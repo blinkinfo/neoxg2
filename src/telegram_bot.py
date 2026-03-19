@@ -51,6 +51,45 @@ log = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# HTML HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _html_escape(text: str) -> str:
+    """Escape HTML special characters for Telegram HTML parse mode."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _bar(value: float, width: int = 12) -> str:
+    """Unicode block bar for visual meters (0.0 to 1.0)."""
+    filled = round(value * width)
+    empty = width - filled
+    return "\u2593" * filled + "\u2591" * empty
+
+
+def _pnl_display(amount: float) -> str:
+    """Format P&L with sign prefix."""
+    if amount >= 0:
+        return f"+${amount:.2f}"
+    return f"-${abs(amount):.2f}"
+
+
+def _confidence_label(confidence: float) -> str:
+    if confidence >= 0.70:
+        return "HIGH"
+    if confidence >= 0.40:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _streak_icon(streak_type: str) -> str:
+    if streak_type and streak_type.lower() == "win":
+        return "\u25b2"  # triangle up
+    elif streak_type and streak_type.lower() == "loss":
+        return "\u25bc"  # triangle down
+    return "\u2014"  # em dash
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MODEL / PREDICTION
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -197,98 +236,93 @@ def resolve_pending_trades():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MESSAGE FORMATTING  (full UX overhaul)
+# MESSAGE FORMATTING  (HTML parse mode)
 # ══════════════════════════════════════════════════════════════════════════════
-
-def _confidence_label(confidence: float) -> str:
-    if confidence >= 0.70:
-        return "HIGH"
-    if confidence >= 0.40:
-        return "MEDIUM"
-    return "LOW"
-
-
-def _confidence_bar(confidence: float, width: int = 10) -> str:
-    """ASCII progress bar for confidence (0-1)."""
-    filled = round(confidence * width)
-    return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
-
-
-def _pnl_emoji(amount: float) -> str:
-    return "+" if amount >= 0 else ""
-
 
 def format_signal_message(result: dict, metrics: dict, stats: dict) -> str:
     """
-    Full signal card:
-      - Clear direction header
-      - Time window
-      - Confidence meter
-      - Key indicators
-      - Threshold info (source shown)
-      - Live session stats footer
+    Full signal card — HTML formatted.
+    Clear direction header, time window, confidence meter,
+    key indicators, threshold info, and session stats footer.
     """
     _, _, slot_open_disp, slot_close_disp, mins, secs = get_next_slot_times()
 
-    direction    = result["prediction"]       # "UP" or "DOWN"
-    dir_emoji    = "\U0001f7e2" if direction == "UP" else "\U0001f534"  # green/red circle
-    arrow        = "\U0001f4c8" if direction == "UP" else "\U0001f4c9"  # chart up/down
+    direction    = result["prediction"]
     conf         = result["confidence"]
     conf_label   = _confidence_label(conf)
-    conf_bar     = _confidence_bar(conf)
+    conf_bar     = _bar(conf)
     prob_up      = result["probability_up"]
     threshold    = result["threshold"]
     thr_source   = result["threshold_source"]
     model_wr     = metrics.get("validation_win_rate", 0)
-    model_ev     = metrics.get("expected_value_per_dollar", 0)
+    price        = result["last_close"]
 
+    if direction == "UP":
+        dir_icon = "\u25b2"  # triangle up
+        dir_word = "UP"
+    else:
+        dir_icon = "\u25bc"  # triangle down
+        dir_word = "DOWN"
+
+    # ── Header
     lines = [
-        f"{dir_emoji} BTC/USDT  5m Signal",
-        f"{arrow} {direction}   {slot_open_disp} -> {slot_close_disp}",
-        "",
-        f"Confidence   {conf_bar} {conf:.0%}  [{conf_label}]",
-        f"Prob UP      {prob_up:.1%}    Prob DOWN  {1 - prob_up:.1%}",
-        "",
-        "---- Indicators ----",
+        f"<b>{dir_icon} BTC/USDT  {dir_word}</b>",
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
     ]
 
+    # ── Slot window
+    lines += [
+        f"<b>Slot</b>       {slot_open_disp} \u2192 {slot_close_disp}",
+        f"<b>Price</b>      ${price:,.2f}",
+        f"<b>Closes in</b>  {mins}m {secs}s",
+        "",
+    ]
+
+    # ── Confidence
+    lines += [
+        f"<b>Confidence</b>",
+        f"  {conf_bar}  {conf:.0%}  <b>{conf_label}</b>",
+        f"  UP {prob_up:.1%}  \u00b7  DOWN {1 - prob_up:.1%}",
+        "",
+    ]
+
+    # ── Indicators
     rsi  = result.get("rsi")
     macd = result.get("macd_histogram")
     vol  = result.get("volume_ratio")
     bb   = result.get("bb_position")
     atr  = result.get("atr_pct")
 
-    if rsi  is not None: lines.append(f"RSI          {rsi}")
-    if macd is not None: lines.append(f"MACD Hist    {macd:+.4f}")
-    if vol  is not None: lines.append(f"Volume Ratio {vol:.2f}x")
-    if bb   is not None: lines.append(f"BB Position  {bb:.2f}")
-    if atr  is not None: lines.append(f"ATR %        {atr:.3%}")
+    indicator_lines = []
+    if rsi  is not None: indicator_lines.append(f"  RSI           {rsi}")
+    if macd is not None: indicator_lines.append(f"  MACD Hist     {macd:+.4f}")
+    if vol  is not None: indicator_lines.append(f"  Vol Ratio     {vol:.2f}x")
+    if bb   is not None: indicator_lines.append(f"  BB Position   {bb:.2f}")
+    if atr  is not None: indicator_lines.append(f"  ATR %         {atr:.3%}")
 
-    lines += [
-        "",
-        "---- Threshold ----",
-        f"Active       {threshold:.3f}  ({thr_source})",
-    ]
+    if indicator_lines:
+        lines.append("<b>Indicators</b>")
+        lines.append("<code>" + "\n".join(indicator_lines) + "</code>")
+        lines.append("")
+
+    # ── Threshold
+    lines.append(f"<b>Threshold</b>  {threshold:.3f}  <i>({thr_source})</i>")
     if model_wr:
-        lines.append(f"Model WR     {model_wr:.1%}   EV/$ {model_ev:+.4f}")
+        lines.append(f"<b>Model WR</b>   {model_wr:.1%}")
 
-    lines += [
-        "",
-        f"Closes in    {mins}m {secs}s",
-    ]
-
-    # Session stats footer (only when we have trades)
+    # ── Session stats footer
     if stats and stats.get("total", 0) > 0:
         wr  = stats["win_rate"]
         pnl = stats["total_profit"]
         sk  = stats["current_streak"]
-        skt = (stats["current_streak_type"] or "").upper()
-        sk_emoji = "\U0001f7e2" if skt == "WIN" else "\U0001f534"
+        skt = (stats["current_streak_type"] or "")
+        sk_icon = _streak_icon(skt)
+
         lines += [
             "",
-            "---- Session ----",
-            f"Trades  {stats['total']}   WR {wr:.1%}   P&L {_pnl_emoji(pnl)}${pnl:.2f}",
-            f"Streak  {sk_emoji} {sk} {skt}",
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            f"<b>Session</b>  {stats['total']} trades  \u00b7  WR {wr:.1%}  \u00b7  {_pnl_display(pnl)}",
+            f"<b>Streak</b>   {sk_icon} {sk} {skt.upper()}",
         ]
 
     return "\n".join(lines)
@@ -296,52 +330,66 @@ def format_signal_message(result: dict, metrics: dict, stats: dict) -> str:
 
 def format_threshold_status(metrics: dict) -> str:
     """
-    /threshold command response — full breakdown of threshold sources
-    and what impact changing it has.
+    /threshold command response -- full breakdown of threshold sources.
     """
     threshold, source = resolve_threshold(metrics)
     trained   = metrics.get("threshold", PREDICTION_THRESHOLD)
     override  = get_runtime_threshold()
     model_wr  = metrics.get("validation_win_rate", 0)
 
-    # Impact guide
+    # Active marker
+    def _mark(src_name):
+        return "\u25c9" if source == src_name else "\u25cb"  # filled vs empty circle
+
     lines = [
-        "\U0001f4ca  Threshold Settings",
+        "<b>\u2699 Threshold Settings</b>",
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         "",
-        f"Active threshold   {threshold:.3f}  ({source})",
-        f"Model trained      {trained:.3f}  (optimal from backtest)",
+        f"<b>Active</b>  {threshold:.3f}",
+        "",
+        "<b>Source Hierarchy</b>",
     ]
+
+    # Runtime override
     if override is not None:
-        lines.append(f"Your override      {override:.3f}  (set via /setthreshold)")
+        lines.append(f"  {_mark('runtime override')}  Runtime override    {override:.3f}")
     else:
-        lines.append(f"Your override      not set")
+        lines.append(f"  {_mark('runtime override')}  Runtime override    <i>not set</i>")
+
+    lines.append(f"  {_mark('model trained')}  Model trained       {trained:.3f}")
+    lines.append(f"  {_mark('config default')}  Config default      {PREDICTION_THRESHOLD:.3f}")
 
     lines += [
         "",
-        "---- What threshold does ----",
-        f"Signal fires when model confidence >= threshold.",
-        f"  Lower ({THRESHOLD_MIN:.2f}+)  = more signals, lower accuracy",
-        f"  Higher (0.65+) = fewer signals, higher accuracy",
-        f"  Trained ({trained:.3f}) = statistically optimal",
+        "<b>Impact Guide</b>",
+        "<code>"
+        f"  Lower ({THRESHOLD_MIN:.2f}+)   more signals, lower accuracy\n"
+        f"  Higher (0.65+)  fewer signals, higher accuracy\n"
+        f"  Optimal         {trained:.3f} (from backtest)"
+        "</code>",
         "",
-        "---- Polymarket guidance ----",
-        f"For paper trading   use {trained:.3f} (model default)",
-        f"For real money      raise to 0.60-0.70 for best edge",
-        "",
+        "<b>Guidance</b>",
+        f"  Paper trading    use <code>{trained:.3f}</code> (model default)",
+        f"  Real money       raise to <code>0.60-0.70</code> for best edge",
     ]
+
     if model_wr:
-        lines.append(f"Model backtest WR  {model_wr:.1%}  (at trained threshold)")
+        lines += [
+            "",
+            f"<b>Backtest WR</b>  {model_wr:.1%}  <i>(at trained threshold)</i>",
+        ]
 
     lines += [
         "",
-        "To change:  /setthreshold 0.62",
-        "To reset:   /setthreshold reset",
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        "Set:   <code>/setthreshold 0.62</code>",
+        "Reset: <code>/setthreshold reset</code>",
     ]
     return "\n".join(lines)
 
 
 def format_status_message(metrics: dict) -> str:
-    """Model health card for /status."""
+    """Model health dashboard for /status."""
     threshold, source = resolve_threshold(metrics)
     val_acc  = metrics.get("validation_accuracy", 0)
     val_auc  = metrics.get("validation_auc", 0)
@@ -356,26 +404,35 @@ def format_status_message(metrics: dict) -> str:
             os.path.getmtime(MODEL_PATH)
         ).strftime("%Y-%m-%d %H:%M UTC")
 
-    health = "\U00002705 Profitable" if val_acc >= 0.52 else "\U000026a0  Below breakeven"
+    if val_acc >= 0.52:
+        health = "\u25cf HEALTHY"
+    else:
+        health = "\u25cf BELOW BREAKEVEN"
 
     lines = [
-        "\U0001f916  Model Status",
+        "<b>\u2699 Model Status</b>",
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         "",
-        f"Trained          {model_date}",
-        f"Training samples {n_train:,}",
-        f"Validation trades {n_val:,}",
+        f"<b>Health</b>  {health}",
         "",
-        "---- Performance ----",
-        f"Accuracy         {val_acc:.2%}",
-        f"AUC-ROC          {val_auc:.4f}",
-        f"Win Rate         {win_rate:.2%}",
-        f"EV per $1        {ev:+.4f}",
+        "<b>Training Info</b>",
+        f"<code>"
+        f"  Trained          {model_date}\n"
+        f"  Training set     {n_train:,} samples\n"
+        f"  Validation set   {n_val:,} trades"
+        f"</code>",
         "",
-        "---- Threshold ----",
-        f"Active           {threshold:.3f}  ({source})",
-        f"Breakeven WR     {BREAKEVEN_WIN_RATE:.1%}",
+        "<b>Performance</b>",
+        f"<code>"
+        f"  Accuracy         {val_acc:.2%}\n"
+        f"  AUC-ROC          {val_auc:.4f}\n"
+        f"  Win Rate         {win_rate:.2%}\n"
+        f"  EV per $1        {ev:+.4f}"
+        f"</code>",
         "",
-        health,
+        "<b>Threshold</b>",
+        f"  Active    {threshold:.3f}  <i>({source})</i>",
+        f"  Breakeven {BREAKEVEN_WIN_RATE:.1%}",
     ]
     return "\n".join(lines)
 
@@ -406,88 +463,118 @@ def format_accuracy_message(resolved_trades: list, metrics: dict) -> str:
     threshold, source = resolve_threshold(metrics)
     model_wr = metrics.get("validation_win_rate", 0)
 
-    verdict = "\U00002705 Profitable" if wr >= BREAKEVEN_WIN_RATE else "\U000026a0  Below breakeven"
+    if wr >= BREAKEVEN_WIN_RATE:
+        verdict = "\u25cf PROFITABLE"
+    else:
+        verdict = "\u25cf BELOW BREAKEVEN"
+
+    # Win rate bar
+    wr_bar = _bar(wr)
 
     lines = [
-        "\U0001f4c8  Live Accuracy Report",
+        "<b>\u2593 Live Accuracy Report</b>",
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         "",
-        f"Resolved trades  {total}",
-        f"Wins / Losses    {wins} / {losses}",
-        f"Live Win Rate    {wr:.1%}",
-        f"Total P&L        {_pnl_emoji(pnl)}${pnl:.2f}",
-        f"EV per trade     {ev_pt:+.4f}",
+        f"  {wr_bar}  <b>{wr:.1%}</b>  Win Rate",
+        f"  <b>{_pnl_display(pnl)}</b>  Total P&amp;L",
         "",
-        "---- By Confidence ----",
-        f"HIGH  (>=70%)    {high_wr:.1%}  ({high_n} trades)",
-        f"MEDIUM (40-70%)  {med_wr:.1%}  ({med_n} trades)",
-        f"LOW   (<40%)     {low_wr:.1%}  ({low_n} trades)",
+        f"<b>Summary</b>",
+        f"<code>"
+        f"  Resolved       {total} trades\n"
+        f"  Wins           {wins}\n"
+        f"  Losses         {losses}\n"
+        f"  EV per trade   {ev_pt:+.4f}"
+        f"</code>",
         "",
-        "---- By Direction ----",
-        f"UP signals       {up_wr:.1%}  ({up_n} trades)",
-        f"DOWN signals     {down_wr:.1%}  ({down_n} trades)",
+        "<b>By Confidence Tier</b>",
+        "<code>"
+        f"  HIGH   (&gt;=70%)   {high_wr:>5.1%}   {high_n:>3} trades\n"
+        f"  MEDIUM (40-70%)  {med_wr:>5.1%}   {med_n:>3} trades\n"
+        f"  LOW    (&lt;40%)    {low_wr:>5.1%}   {low_n:>3} trades"
+        "</code>",
         "",
-        "---- Model Validation ----",
-        f"Backtest WR      {model_wr:.1%}",
-        f"Accuracy         {metrics.get('validation_accuracy', 0):.2%}",
-        f"AUC              {metrics.get('validation_auc', 0):.4f}",
-        f"Threshold        {threshold:.3f}  ({source})",
-        f"Breakeven        {BREAKEVEN_WIN_RATE:.1%}",
+        "<b>By Direction</b>",
+        "<code>"
+        f"  UP signals       {up_wr:>5.1%}   {up_n:>3} trades\n"
+        f"  DOWN signals     {down_wr:>5.1%}   {down_n:>3} trades"
+        "</code>",
         "",
-        verdict,
+        "<b>Model Validation</b>",
+        "<code>"
+        f"  Backtest WR      {model_wr:.1%}\n"
+        f"  Accuracy         {metrics.get('validation_accuracy', 0):.2%}\n"
+        f"  AUC              {metrics.get('validation_auc', 0):.4f}\n"
+        f"  Threshold        {threshold:.3f}  ({source})\n"
+        f"  Breakeven        {BREAKEVEN_WIN_RATE:.1%}"
+        "</code>",
+        "",
+        f"<b>{verdict}</b>",
     ]
     return "\n".join(lines)
 
 
 def format_start_message() -> str:
+    """Welcome card for /start."""
     return "\n".join([
-        "\U0001f916  NeoXG  |  BTC 5-min Signal Bot",
+        "<b>NeoXG</b>  \u2502  BTC 5-Min Signal Bot",
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         "",
-        "XGBoost ML model predicting BTC/USDT 5-min candle direction.",
-        "Signals fire 15s before each new candle — every 5 minutes.",
+        "XGBoost ML model predicting BTC/USDT",
+        "5-min candle direction. Signals fire",
+        "<b>15 seconds before</b> each new candle.",
         "",
-        "---- Commands ----",
-        "/signal       Live prediction now",
-        "/stats        Win/loss tracker + recent trades",
-        "/status       Model health + performance",
-        "/accuracy     Detailed live accuracy breakdown",
-        "/threshold    View threshold settings",
-        "/setthreshold Set confidence threshold",
-        "/help         Command reference",
+        "<b>\u2500 Trading</b>",
+        "  /signal         Live prediction now",
+        "  /stats          Session stats + recent trades",
         "",
-        "---- Threshold ----",
-        "Controls minimum model confidence before a signal fires.",
-        "Use /threshold to learn more, /setthreshold 0.62 to set.",
+        "<b>\u2500 Analysis</b>",
+        "  /accuracy       Detailed accuracy breakdown",
+        "  /status         Model health + performance",
         "",
-        "Auto-signals run continuously. Use /signal anytime.",
+        "<b>\u2500 Settings</b>",
+        "  /threshold      View threshold settings",
+        "  /setthreshold   Set confidence threshold",
+        "",
+        "<b>\u2500 General</b>",
+        "  /help           Command reference",
+        "",
+        "<i>Auto-signals run every 5 min continuously.</i>",
     ])
 
 
 def format_help_message() -> str:
+    """Detailed command reference for /help."""
     return "\n".join([
-        "\U0001f4cb  Command Reference",
+        "<b>\u2263 Command Reference</b>",
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         "",
-        "/signal",
+        "<b>/signal</b>",
         "  Get a live BTC 5-min prediction right now.",
+        "  Includes direction, confidence, and indicators.",
         "",
-        "/stats",
-        "  Win rate, P&L, streaks, and last 5 trades.",
+        "<b>/stats</b>",
+        "  Win rate, P&amp;L, streaks, and last 5 trades.",
+        "  Resolves any pending trades first.",
         "",
-        "/status",
-        "  Model accuracy, AUC, training date, threshold.",
+        "<b>/accuracy</b>",
+        "  Full breakdown by confidence tier and",
+        "  direction. Live vs model validation.",
         "",
-        "/accuracy",
-        "  Full breakdown by confidence tier and direction.",
+        "<b>/status</b>",
+        "  Model accuracy, AUC, training date,",
+        "  and current threshold configuration.",
         "",
-        "/threshold",
-        "  View active threshold, model trained value,",
-        "  and Polymarket guidance.",
+        "<b>/threshold</b>",
+        "  View active threshold, source hierarchy,",
+        "  and trading guidance.",
         "",
-        "/setthreshold <value>",
-        "  Set confidence threshold (0.30 - 0.90).",
-        "  Example: /setthreshold 0.62",
-        "  Reset to model default: /setthreshold reset",
+        "<b>/setthreshold</b> <code>&lt;value&gt;</code>",
+        f"  Set confidence threshold ({THRESHOLD_MIN} - {THRESHOLD_MAX}).",
+        "  Example: <code>/setthreshold 0.62</code>",
+        "  Reset:   <code>/setthreshold reset</code>",
         "",
-        "Auto-signals fire 15s before every 5-min candle.",
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        "<i>Auto-signals fire 15s before every 5-min candle.</i>",
     ])
 
 
@@ -496,11 +583,12 @@ def format_help_message() -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_bot():
-    from telegram import Update
+    from telegram import Update, BotCommand
     from telegram.ext import (
         Application, CommandHandler, MessageHandler,
         filters, ContextTypes
     )
+    from telegram.constants import ParseMode
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set!")
@@ -513,17 +601,39 @@ def run_bot():
     else:
         log.info("Data and model present - starting bot.")
 
+    # ── Menu Commands Setup ───────────────────────────────────────────────────
+
+    async def _set_menu_commands(app_instance):
+        """Register bot menu commands with Telegram (the / command picker)."""
+        commands = [
+            BotCommand("signal",       "Get live BTC 5-min prediction"),
+            BotCommand("stats",        "Win rate, P&L, recent trades"),
+            BotCommand("accuracy",     "Detailed accuracy breakdown"),
+            BotCommand("status",       "Model health & performance"),
+            BotCommand("threshold",    "View threshold settings"),
+            BotCommand("setthreshold", "Set confidence threshold"),
+            BotCommand("help",         "Command reference"),
+        ]
+        await app_instance.bot.set_my_commands(commands)
+        log.info("Menu commands registered with Telegram.")
+
     # ── Handlers ──────────────────────────────────────────────────────────────
 
     async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(format_start_message())
+        await update.message.reply_text(
+            format_start_message(), parse_mode=ParseMode.HTML
+        )
 
     async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(format_help_message())
+        await update.message.reply_text(
+            format_help_message(), parse_mode=ParseMode.HTML
+        )
 
     async def signal_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
-            msg = await update.message.reply_text("Fetching signal...")
+            await update.message.reply_text(
+                "<i>Fetching signal...</i>", parse_mode=ParseMode.HTML
+            )
             resolve_pending_trades()
             pred, metrics = get_live_prediction()
             stats = get_stats()
@@ -542,29 +652,48 @@ def run_bot():
                 volume_ratio=pred["volume_ratio"],
             )
             log.info(f"Signal #{trade['id']}: {pred['prediction']} prob={pred['probability_up']:.4f}")
-            await update.message.reply_text(format_signal_message(pred, metrics, stats))
+            await update.message.reply_text(
+                format_signal_message(pred, metrics, stats),
+                parse_mode=ParseMode.HTML,
+            )
         except Exception as e:
             log.exception("signal_cmd error")
-            await update.message.reply_text(f"Error generating signal: {e}")
+            await update.message.reply_text(
+                f"\u26a0 <b>Signal Error</b>\n\n<code>{_html_escape(str(e))}</code>\n\n"
+                f"<i>Try again in a moment or check /status.</i>",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             resolve_pending_trades()
-            await update.message.reply_text(format_stats_message())
+            await update.message.reply_text(
+                format_stats_message(), parse_mode=ParseMode.HTML
+            )
             recent = format_recent_trades_message(5)
             if recent:
-                await update.message.reply_text(recent)
+                await update.message.reply_text(
+                    recent, parse_mode=ParseMode.HTML
+                )
         except Exception as e:
             log.exception("stats_cmd error")
-            await update.message.reply_text(f"Error: {e}")
+            await update.message.reply_text(
+                f"\u26a0 <b>Stats Error</b>\n\n<code>{_html_escape(str(e))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             _, metrics = load_model()
-            await update.message.reply_text(format_status_message(metrics))
+            await update.message.reply_text(
+                format_status_message(metrics), parse_mode=ParseMode.HTML
+            )
         except Exception as e:
             log.exception("status_cmd error")
-            await update.message.reply_text(f"Error: {e}")
+            await update.message.reply_text(
+                f"\u26a0 <b>Status Error</b>\n\n<code>{_html_escape(str(e))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def accuracy_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
@@ -573,24 +702,40 @@ def run_bot():
             resolved = [t for t in tracker_data.get("trades", []) if t.get("resolved")]
             if not resolved:
                 await update.message.reply_text(
-                    "No resolved trades yet.\n"
-                    "Auto-signals run every 5 min. Check back soon!"
+                    "<b>\u2593 Live Accuracy Report</b>\n"
+                    f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+                    "No resolved trades yet.\n\n"
+                    "<i>Auto-signals run every 5 min.\n"
+                    "Trades resolve when their candle closes.\n"
+                    "Check back in a few minutes!</i>",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
             _, metrics = load_model()
-            await update.message.reply_text(format_accuracy_message(resolved, metrics))
+            await update.message.reply_text(
+                format_accuracy_message(resolved, metrics),
+                parse_mode=ParseMode.HTML,
+            )
         except Exception as e:
             log.exception("accuracy_cmd error")
-            await update.message.reply_text(f"Error: {e}")
+            await update.message.reply_text(
+                f"\u26a0 <b>Accuracy Error</b>\n\n<code>{_html_escape(str(e))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def threshold_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Show current threshold settings and guidance."""
         try:
             _, metrics = load_model()
-            await update.message.reply_text(format_threshold_status(metrics))
+            await update.message.reply_text(
+                format_threshold_status(metrics), parse_mode=ParseMode.HTML
+            )
         except Exception as e:
             log.exception("threshold_cmd error")
-            await update.message.reply_text(f"Error: {e}")
+            await update.message.reply_text(
+                f"\u26a0 <b>Threshold Error</b>\n\n<code>{_html_escape(str(e))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def setthreshold_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """
@@ -601,10 +746,13 @@ def run_bot():
             args = ctx.args
             if not args:
                 await update.message.reply_text(
-                    "Usage:\n"
-                    "  /setthreshold 0.62    set threshold\n"
-                    "  /setthreshold reset   revert to model default\n"
-                    f"\nValid range: {THRESHOLD_MIN} - {THRESHOLD_MAX}"
+                    "<b>\u2699 Set Threshold</b>\n"
+                    f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+                    "<b>Usage:</b>\n"
+                    "  <code>/setthreshold 0.62</code>    set threshold\n"
+                    "  <code>/setthreshold reset</code>   revert to default\n\n"
+                    f"Valid range: <code>{THRESHOLD_MIN}</code> - <code>{THRESHOLD_MAX}</code>",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
 
@@ -616,8 +764,10 @@ def run_bot():
                 _, metrics = load_model()
                 trained = metrics.get("threshold", PREDICTION_THRESHOLD)
                 await update.message.reply_text(
-                    "\U00002705  Threshold reset to model default.\n"
-                    f"Active threshold: {trained:.3f}  (model trained)"
+                    "<b>\u2713 Threshold Reset</b>\n\n"
+                    f"Reverted to model default.\n"
+                    f"Active threshold: <code>{trained:.3f}</code>  <i>(model trained)</i>",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
 
@@ -626,20 +776,24 @@ def run_bot():
                 value = float(raw)
             except ValueError:
                 await update.message.reply_text(
-                    f"Invalid value: '{raw}'\n"
-                    f"Use a number between {THRESHOLD_MIN} and {THRESHOLD_MAX}, "
-                    f"or 'reset'."
+                    f"\u26a0 <b>Invalid Value</b>\n\n"
+                    f"<code>{_html_escape(raw)}</code> is not a valid number.\n\n"
+                    f"Use a number between <code>{THRESHOLD_MIN}</code> and <code>{THRESHOLD_MAX}</code>, "
+                    f"or <code>reset</code>.",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
 
             # Validate range
             if not (THRESHOLD_MIN <= value <= THRESHOLD_MAX):
                 await update.message.reply_text(
-                    f"\U000026a0  Out of range: {value:.3f}\n"
-                    f"Valid range: {THRESHOLD_MIN} - {THRESHOLD_MAX}\n\n"
-                    "Guidance:\n"
-                    "  Paper trading   0.52 - 0.58\n"
-                    "  Real money      0.60 - 0.70"
+                    f"\u26a0 <b>Out of Range</b>\n\n"
+                    f"<code>{value:.3f}</code> is outside the valid range.\n"
+                    f"Valid: <code>{THRESHOLD_MIN}</code> - <code>{THRESHOLD_MAX}</code>\n\n"
+                    "<b>Guidance:</b>\n"
+                    "  Paper trading   <code>0.52 - 0.58</code>\n"
+                    "  Real money      <code>0.60 - 0.70</code>",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
 
@@ -648,33 +802,41 @@ def run_bot():
             trained = metrics.get("threshold", PREDICTION_THRESHOLD)
             set_runtime_threshold(value)
 
-            impact = ""
             diff = value - trained
+
+            impact = ""
             if diff > 0.08:
                 impact = (
-                    "\n\nNote: significantly above model optimal. "
-                    "Fewer signals but not guaranteed more accurate."
+                    "\n\n<i>\u26a0 Significantly above model optimal. "
+                    "Fewer signals but not guaranteed more accurate.</i>"
                 )
             elif diff < -0.08:
                 impact = (
-                    "\n\nNote: significantly below model optimal. "
-                    "More signals but lower expected accuracy."
+                    "\n\n<i>\u26a0 Significantly below model optimal. "
+                    "More signals but lower expected accuracy.</i>"
                 )
 
             await update.message.reply_text(
-                f"\U00002705  Threshold updated.\n\n"
-                f"New threshold   {value:.3f}  (runtime override)\n"
-                f"Model trained   {trained:.3f}\n"
-                f"Difference      {diff:+.3f}"
-                + impact
+                "<b>\u2713 Threshold Updated</b>\n\n"
+                f"<code>"
+                f"  New threshold   {value:.3f}  (runtime override)\n"
+                f"  Model trained   {trained:.3f}\n"
+                f"  Difference      {diff:+.3f}"
+                f"</code>"
+                + impact,
+                parse_mode=ParseMode.HTML,
             )
         except Exception as e:
             log.exception("setthreshold_cmd error")
-            await update.message.reply_text(f"Error: {e}")
+            await update.message.reply_text(
+                f"\u26a0 <b>Threshold Error</b>\n\n<code>{_html_escape(str(e))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def unknown_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "Unknown command. Type /help for the full list."
+            "\u26a0 Unknown command.\n\nType /help for the full list.",
+            parse_mode=ParseMode.HTML,
         )
 
     # ── Candle-aligned auto-signal ─────────────────────────────────────────────
@@ -702,6 +864,7 @@ def run_bot():
             await ctx.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=format_signal_message(pred, metrics, stats),
+                parse_mode=ParseMode.HTML,
             )
             log.info(
                 f"Auto-signal #{trade['id']}: {pred['prediction']} "
@@ -730,9 +893,14 @@ def run_bot():
             data={"app": app},
         )
 
+    # ── Post-init: register menu commands ────────────────────────────────────
+
+    async def _post_init(app_instance):
+        await _set_menu_commands(app_instance)
+
     # ── Build app ────────────────────────────────────────────────────────────
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(_post_init).build()
 
     app.add_handler(CommandHandler("start",        start_cmd))
     app.add_handler(CommandHandler("help",         help_cmd))

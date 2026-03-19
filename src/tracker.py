@@ -41,8 +41,26 @@ def _display_slot(slot_str: str) -> str:
     return slot_str
 
 
-def _pnl_sign(amount: float) -> str:
-    return "+" if amount >= 0 else ""
+def _pnl_display(amount: float) -> str:
+    """Format P&L with sign prefix."""
+    if amount >= 0:
+        return f"+${amount:.2f}"
+    return f"-${abs(amount):.2f}"
+
+
+def _bar(value: float, width: int = 12) -> str:
+    """Unicode block bar for visual meters (0.0 to 1.0)."""
+    filled = round(value * width)
+    empty = width - filled
+    return "\u2593" * filled + "\u2591" * empty
+
+
+def _streak_icon(streak_type: str) -> str:
+    if streak_type and streak_type.lower() == "win":
+        return "\u25b2"  # triangle up
+    elif streak_type and streak_type.lower() == "loss":
+        return "\u25bc"  # triangle down
+    return "\u2014"  # em dash
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
@@ -178,75 +196,104 @@ def get_recent_trades(n: int = 10) -> list:
     return load_tracker()["trades"][-n:]
 
 
-# ── Formatting ────────────────────────────────────────────────────────────────
+# ── Formatting (HTML) ─────────────────────────────────────────────────────────
 
 def format_stats_message() -> str:
-    """Session stats card for /stats."""
+    """Session stats card for /stats — HTML formatted."""
     stats = get_stats()
     total = stats["total"]
 
     if total == 0:
-        return "\n".join([
-            "\U0001f4ca  Session Tracker",
-            "",
-            "No resolved trades yet.",
-            "Auto-signals fire every 5 min. Check back soon!",
-        ])
+        return (
+            "<b>\u2593 Session Tracker</b>\n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            "No resolved trades yet.\n\n"
+            "<i>Auto-signals fire every 5 min.\n"
+            "Trades resolve when their candle closes.\n"
+            "Check back in a few minutes!</i>"
+        )
 
     wr     = stats["win_rate"]
     pnl    = stats["total_profit"]
     ev_pt  = pnl / total
     stype  = stats["current_streak_type"] or ""
     sk     = stats["current_streak"]
-    sk_emoji = "\U0001f7e2" if stype == "win" else "\U0001f534"
-    sk_text  = f"{sk_emoji} {sk} {stype.upper()}" if stype else "--"
+    sk_icon = _streak_icon(stype)
 
-    # Simple win-rate bar
-    bar_w  = 10
-    filled = round(wr * bar_w)
-    wr_bar = "[" + ("#" * filled) + ("-" * (bar_w - filled)) + "]"
+    # Win rate bar
+    wr_bar = _bar(wr)
 
     breakeven = 1 / (1 + PAYOUT)
-    verdict = "\U00002705 Profitable" if wr >= breakeven else "\U000026a0  Below breakeven"
+    if wr >= breakeven:
+        verdict = "\u25cf PROFITABLE"
+    else:
+        verdict = "\u25cf BELOW BREAKEVEN"
 
-    return "\n".join([
-        "\U0001f4ca  Session Tracker",
+    lines = [
+        "<b>\u2593 Session Tracker</b>",
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         "",
-        f"Trades    {total}   Wins {stats['wins']}   Losses {stats['losses']}",
-        f"Win Rate  {wr_bar} {wr:.1%}",
-        f"Total P&L {_pnl_sign(pnl)}${pnl:.2f}   EV/trade {ev_pt:+.4f}",
+        f"  <b>{_pnl_display(pnl)}</b>  Total P&amp;L",
+        f"  {wr_bar}  <b>{wr:.1%}</b>  Win Rate",
         "",
-        f"Current streak  {sk_text}",
-        f"Best win streak  {stats['max_win_streak']}",
-        f"Worst loss streak {stats['max_loss_streak']}",
+        "<b>Record</b>",
+        "<code>"
+        f"  Trades          {total}\n"
+        f"  Wins            {stats['wins']}\n"
+        f"  Losses          {stats['losses']}\n"
+        f"  EV per trade    {ev_pt:+.4f}"
+        "</code>",
         "",
-        f"Payout  +${PAYOUT:.2f} (win)  /  -$1.00 (loss)",
+        "<b>Streaks</b>",
+        "<code>"
+        f"  Current         {sk_icon} {sk} {stype.upper() if stype else '--'}\n"
+        f"  Best win        {stats['max_win_streak']}\n"
+        f"  Worst loss      {stats['max_loss_streak']}"
+        "</code>",
         "",
-        verdict,
-    ])
+        f"<b>Payout</b>  +${PAYOUT:.2f} (win)  /  -$1.00 (loss)",
+        "",
+        f"<b>{verdict}</b>",
+    ]
+    return "\n".join(lines)
 
 
 def format_recent_trades_message(n: int = 5) -> str:
-    """Last N trades as a compact list."""
+    """Last N trades as a formatted list — HTML."""
     trades = get_recent_trades(n)
     if not trades:
         return ""
 
-    lines = ["\U0001f552  Recent Trades", ""]
+    lines = [
+        "<b>\u23f1 Recent Trades</b>",
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        "",
+    ]
+
     for t in reversed(trades):
         slot  = _display_slot(t["slot_open"])
         prob  = t["probability_up"]
         direc = t["direction"]
+        tid   = t["id"]
+
         if t["resolved"]:
-            icon   = "\u2705" if t["result"] == "WIN" else "\u274c"
-            profit = t["profit"]
+            if t["result"] == "WIN":
+                icon   = "\u2713"  # checkmark
+                profit = t["profit"]
+                result_str = f"<b>{_pnl_display(profit)}</b>"
+            else:
+                icon   = "\u2717"  # x mark
+                profit = t["profit"]
+                result_str = f"{_pnl_display(profit)}"
+
             lines.append(
-                f"{icon} {slot}  {direc:<4}  P={prob:.0%}  "
-                f"{_pnl_sign(profit)}${profit:.2f}"
+                f"  {icon}  <code>#{tid:>3}</code>  {slot}  "
+                f"<b>{direc:<4}</b>  {prob:.0%}  {result_str}"
             )
         else:
             lines.append(
-                f"\u23f3 {slot}  {direc:<4}  P={prob:.0%}  pending"
+                f"  \u25cb  <code>#{tid:>3}</code>  {slot}  "
+                f"<b>{direc:<4}</b>  {prob:.0%}  <i>pending</i>"
             )
 
     return "\n".join(lines)
