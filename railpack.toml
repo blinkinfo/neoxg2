@@ -1,7 +1,4 @@
 [start]
-cmd = "pip install -r requirements.txt && python -m src.telegram_bot"
+cmd = "python -m src.telegram_bot"
 
 [env]
-# These will be set in Railway's dashboard
-# TELEGRAM_BOT_TOKEN = "your_bot_token"
-# TELEGRAM_CHAT_ID = "your_chat_id"
