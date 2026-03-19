@@ -1,38 +1,36 @@
 """
 tracker.py
 Tracks signal history, calculates wins/losses, win rate, streaks.
-Stores results in a JSON file.
+Stores results in a JSON file atomically.
 """
 
 import os
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
-from src.config import DATA_DIR, LOGS_DIR
+from src.config import DATA_DIR, LOGS_DIR, PAYOUT
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
     handlers=[
         logging.FileHandler(os.path.join(LOGS_DIR, "tracker.log")),
-        logging.StreamHandler()
-    ]
+        logging.StreamHandler(),
+    ],
 )
 log = logging.getLogger(__name__)
-
 
 TRACKER_FILE = os.path.join(DATA_DIR, "signal_results.json")
 
 
-def _display_slot(slot_str):
-    """
-    Convert a slot time string to a human-readable display format.
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-    Handles both formats:
-      - ISO-8601:  "2026-03-19T19:30:00"  -> "19:30 UTC"
-      - Legacy:    "19:30 UTC"            -> "19:30 UTC" (unchanged)
+def _display_slot(slot_str: str) -> str:
+    """
+    Convert slot time string to display format.
+    ISO-8601 '2026-03-19T19:30:00' -> '19:30 UTC'
+    Legacy   '19:30 UTC'           -> '19:30 UTC' (unchanged)
     """
     if "T" in slot_str:
         try:
@@ -43,207 +41,216 @@ def _display_slot(slot_str):
     return slot_str
 
 
-def load_tracker():
-    """Load tracker data from JSON file. Handles corrupted files gracefully."""
+def _pnl_sign(amount: float) -> str:
+    return "+" if amount >= 0 else ""
+
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+
+def load_tracker() -> dict:
+    """Load tracker JSON. Backs up and resets on corruption."""
     if os.path.exists(TRACKER_FILE):
         try:
             with open(TRACKER_FILE, "r") as f:
                 return json.load(f)
         except (json.JSONDecodeError, ValueError):
-            # File corrupted — back it up and start fresh
             ts = int(datetime.now(timezone.utc).timestamp())
             backup = TRACKER_FILE + f".broken_{ts}"
             os.rename(TRACKER_FILE, backup)
-            log.warning(f"Corrupted tracker file renamed to {backup}")
+            log.warning(f"Corrupted tracker file backed up to {backup}")
     return {
         "trades": [],
         "stats": {
-            "total": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
-            "current_streak": 0, "current_streak_type": None,
-            "max_win_streak": 0, "max_loss_streak": 0,
-            "total_profit": 0.0, "payout": 0.96,
-        }
+            "total": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "current_streak": 0,
+            "current_streak_type": None,
+            "max_win_streak": 0,
+            "max_loss_streak": 0,
+            "total_profit": 0.0,
+            "payout": PAYOUT,
+        },
     }
 
 
-def save_tracker(data):
-    """Save tracker data to JSON file atomically (write to temp, then rename)."""
-    tmp_path = TRACKER_FILE + ".tmp"
-    with open(tmp_path, "w") as f:
+def save_tracker(data: dict) -> None:
+    """Save tracker JSON atomically (write temp, then rename)."""
+    tmp = TRACKER_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
-    os.replace(tmp_path, TRACKER_FILE)  # atomic on POSIX
+    os.replace(tmp, TRACKER_FILE)
 
+
+# ── Write ops ─────────────────────────────────────────────────────────────────
 
 def record_signal(
     slot_open_time: str,
     slot_close_time: str,
-    direction: str,          # "UP" or "DOWN"
-    direction_code: int,     # 1 = UP, 0 = DOWN
+    direction: str,
+    direction_code: int,
     probability_up: float,
     confidence: float,
-    close_at_signal: float,  # close price when signal was generated
+    close_at_signal: float,
     rsi: Optional[float] = None,
     macd_histogram: Optional[float] = None,
     volume_ratio: Optional[float] = None,
-):
-    """
-    Record a signal that was sent. Outcome will be filled in later
-    when the candle closes and we fetch the actual result.
-    """
+) -> dict:
+    """Record a new signal. Result filled in later when candle closes."""
     data = load_tracker()
-
     trade = {
-        "id": len(data["trades"]) + 1,
-        "slot_open": slot_open_time,
-        "slot_close": slot_close_time,
-        "direction": direction,
-        "direction_code": int(direction_code),
-        "probability_up": float(probability_up),
-        "confidence": float(confidence),
-        "close_at_signal": float(close_at_signal),
-        "rsi": float(rsi) if rsi is not None else None,
-        "macd_histogram": float(macd_histogram) if macd_histogram is not None else None,
-        "volume_ratio": float(volume_ratio) if volume_ratio is not None else None,
-        "result": None,        # will be "WIN" or "LOSS"
-        "profit": 0.0,         # +0.96 for win, -1.00 for loss
-        "resolved": False,
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "resolved_at": None,
+        "id":               len(data["trades"]) + 1,
+        "slot_open":        slot_open_time,
+        "slot_close":       slot_close_time,
+        "direction":        direction,
+        "direction_code":   int(direction_code),
+        "probability_up":   float(probability_up),
+        "confidence":       float(confidence),
+        "close_at_signal":  float(close_at_signal),
+        "rsi":              float(rsi) if rsi is not None else None,
+        "macd_histogram":   float(macd_histogram) if macd_histogram is not None else None,
+        "volume_ratio":     float(volume_ratio) if volume_ratio is not None else None,
+        "result":           None,
+        "profit":           0.0,
+        "resolved":         False,
+        "recorded_at":      datetime.now(timezone.utc).isoformat(),
+        "resolved_at":      None,
     }
-
     data["trades"].append(trade)
     save_tracker(data)
-
     return trade
 
 
-def resolve_trade(trade_id: int, outcome_code: int):
+def resolve_trade(trade_id: int, outcome_code: int) -> Optional[dict]:
     """
-    Resolve a trade after the candle closes.
-
-    outcome_code: 1 = candle went UP, 0 = candle went DOWN
+    Resolve a trade after candle close.
+    outcome_code: 1 = candle UP, 0 = candle DOWN
     """
     data = load_tracker()
-
     for trade in reversed(data["trades"]):
-        if trade["id"] == trade_id:
-            if trade["resolved"]:
-                return  # already resolved
+        if trade["id"] != trade_id:
+            continue
+        if trade["resolved"]:
+            return None
 
-            won = trade["direction_code"] == outcome_code
-            trade["result"] = "WIN" if won else "LOSS"
-            trade["profit"] = 0.96 if won else -1.00
-            trade["resolved"] = True
-            trade["resolved_at"] = datetime.now(timezone.utc).isoformat()
+        won = trade["direction_code"] == outcome_code
+        trade["result"]      = "WIN" if won else "LOSS"
+        trade["profit"]      = PAYOUT if won else -1.00
+        trade["resolved"]    = True
+        trade["resolved_at"] = datetime.now(timezone.utc).isoformat()
 
-            # Update stats
-            stats = data["stats"]
-            stats["total"] += 1
-
-            if won:
-                stats["wins"] += 1
-                if stats["current_streak_type"] == "win":
-                    stats["current_streak"] += 1
-                else:
-                    stats["current_streak"] = 1
-                    stats["current_streak_type"] = "win"
-                stats["max_win_streak"] = max(stats["max_win_streak"], stats["current_streak"])
+        stats = data["stats"]
+        stats["total"] += 1
+        if won:
+            stats["wins"] += 1
+            if stats["current_streak_type"] == "win":
+                stats["current_streak"] += 1
             else:
-                stats["losses"] += 1
-                if stats["current_streak_type"] == "loss":
-                    stats["current_streak"] += 1
-                else:
-                    stats["current_streak"] = 1
-                    stats["current_streak_type"] = "loss"
-                stats["max_loss_streak"] = max(stats["max_loss_streak"], stats["current_streak"])
+                stats["current_streak"]      = 1
+                stats["current_streak_type"] = "win"
+            stats["max_win_streak"] = max(stats["max_win_streak"], stats["current_streak"])
+        else:
+            stats["losses"] += 1
+            if stats["current_streak_type"] == "loss":
+                stats["current_streak"] += 1
+            else:
+                stats["current_streak"]      = 1
+                stats["current_streak_type"] = "loss"
+            stats["max_loss_streak"] = max(stats["max_loss_streak"], stats["current_streak"])
 
-            stats["win_rate"] = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
-            stats["total_profit"] += trade["profit"]
+        stats["win_rate"]     = stats["wins"] / stats["total"]
+        stats["total_profit"] = round(stats["total_profit"] + trade["profit"], 4)
 
-            save_tracker(data)
-            return trade
+        save_tracker(data)
+        return trade
 
     return None
 
 
-def get_stats():
-    """Return current stats summary."""
-    data = load_tracker()
-    return data["stats"]
+# ── Read ops ──────────────────────────────────────────────────────────────────
+
+def get_stats() -> dict:
+    return load_tracker()["stats"]
 
 
-def get_recent_trades(n=10):
-    """Return the most recent n trades."""
-    data = load_tracker()
-    return data["trades"][-n:]
+def get_recent_trades(n: int = 10) -> list:
+    return load_tracker()["trades"][-n:]
 
 
-def format_stats_message():
-    """Format stats as a Telegram message."""
+# ── Formatting ────────────────────────────────────────────────────────────────
+
+def format_stats_message() -> str:
+    """Session stats card for /stats."""
     stats = get_stats()
-
-    streak_emoji = "\U0001f7e2" if stats["current_streak_type"] == "win" else "\U0001f534"
-    streak_text = (
-        f"{streak_emoji} {stats['current_streak']} {stats['current_streak_type'].upper()}"
-        if stats["current_streak_type"]
-        else "--"
-    )
-
     total = stats["total"]
+
     if total == 0:
-        return "No trades recorded yet.\nPlace some trades first!"
+        return "\n".join([
+            "\U0001f4ca  Session Tracker",
+            "",
+            "No resolved trades yet.",
+            "Auto-signals fire every 5 min. Check back soon!",
+        ])
 
-    ev_per_trade = stats["total_profit"] / total
+    wr     = stats["win_rate"]
+    pnl    = stats["total_profit"]
+    ev_pt  = pnl / total
+    stype  = stats["current_streak_type"] or ""
+    sk     = stats["current_streak"]
+    sk_emoji = "\U0001f7e2" if stype == "win" else "\U0001f534"
+    sk_text  = f"{sk_emoji} {sk} {stype.upper()}" if stype else "--"
 
-    msg = (
-        "Signal Tracker\n"
-        "---\n"
-        f"Total trades:  {total}\n"
-        f"Wins:         {stats['wins']}  |  Losses: {stats['losses']}\n"
-        f"Win rate:     {stats['win_rate']:.1%}\n"
-        "---\n"
-        f"Current streak: {streak_text}\n"
-        f"Max win streak: {stats['max_win_streak']}\n"
-        f"Max loss streak: {stats['max_loss_streak']}\n"
-        "---\n"
-        f"Total P&L:    ${stats['total_profit']:.2f}\n"
-        f"EV per trade: ${ev_per_trade:.4f}\n"
-        f"Payout:       $0.96 (win) / -$1.00 (loss)"
-    )
+    # Simple win-rate bar
+    bar_w  = 10
+    filled = round(wr * bar_w)
+    wr_bar = "[" + ("#" * filled) + ("-" * (bar_w - filled)) + "]"
 
-    return msg
+    breakeven = 1 / (1 + PAYOUT)
+    verdict = "\U00002705 Profitable" if wr >= breakeven else "\U000026a0  Below breakeven"
+
+    return "\n".join([
+        "\U0001f4ca  Session Tracker",
+        "",
+        f"Trades    {total}   Wins {stats['wins']}   Losses {stats['losses']}",
+        f"Win Rate  {wr_bar} {wr:.1%}",
+        f"Total P&L {_pnl_sign(pnl)}${pnl:.2f}   EV/trade {ev_pt:+.4f}",
+        "",
+        f"Current streak  {sk_text}",
+        f"Best win streak  {stats['max_win_streak']}",
+        f"Worst loss streak {stats['max_loss_streak']}",
+        "",
+        f"Payout  +${PAYOUT:.2f} (win)  /  -$1.00 (loss)",
+        "",
+        verdict,
+    ])
 
 
-def format_recent_trades_message(n=5):
-    """Format recent trades as a Telegram message."""
+def format_recent_trades_message(n: int = 5) -> str:
+    """Last N trades as a compact list."""
     trades = get_recent_trades(n)
     if not trades:
         return ""
 
-    lines = ["\n---\nRecent Trades:\n"]
-
+    lines = ["\U0001f552  Recent Trades", ""]
     for t in reversed(trades):
-        slot_disp = _display_slot(t["slot_open"])
-
+        slot  = _display_slot(t["slot_open"])
+        prob  = t["probability_up"]
+        direc = t["direction"]
         if t["resolved"]:
-            result_emoji = "\u2705" if t["result"] == "WIN" else "\u274c"
+            icon   = "\u2705" if t["result"] == "WIN" else "\u274c"
+            profit = t["profit"]
             lines.append(
-                f"{result_emoji} {slot_disp} | "
-                f"{t['direction']} | "
-                f"P={t['probability_up']:.1%} | "
-                f"{'WIN' if t['result']=='WIN' else 'LOSS'} ${t['profit']:.2f}"
+                f"{icon} {slot}  {direc:<4}  P={prob:.0%}  "
+                f"{_pnl_sign(profit)}${profit:.2f}"
             )
         else:
             lines.append(
-                f"\u23f3 {slot_disp} | "
-                f"{t['direction']} | "
-                f"P={t['probability_up']:.1%} | "
-                f"PENDING"
+                f"\u23f3 {slot}  {direc:<4}  P={prob:.0%}  pending"
             )
 
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    # Quick test
     print(format_stats_message())
