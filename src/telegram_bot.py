@@ -48,14 +48,14 @@ def load_model():
     import xgboost as xgb
     model = xgb.XGBClassifier()
     model.load_model(MODEL_PATH)
-    
-    metrics_path = MODEL_PATH.replace(".json", "_metrics.json")
+
+    metrics_path = str(MODEL_PATH).replace(".json", "_metrics.json")
     if os.path.exists(metrics_path):
         with open(metrics_path) as f:
             metrics = json.load(f)
     else:
         metrics = {}
-    
+
     return model, metrics
 
 
@@ -63,31 +63,31 @@ def get_live_prediction():
     """Get current direction prediction from model."""
     model, metrics = load_model()
     threshold = metrics.get("threshold", PREDICTION_THRESHOLD)
-    
+
     df = fetch_live_candles(lookback=200)
     df_feat = compute_features(df.copy())
     X, _, _ = prepare_ml_data(df_feat, drop_na=True)
-    
+
     X_last = X.iloc[[-1]]
     proba = model.predict_proba(X_last)[0, 1]
     prediction = 1 if proba >= threshold else 0
     confidence = abs(proba - 0.5) * 2
-    
+
     last_c = df_feat.iloc[-1]
     prev_c = df_feat.iloc[-2]
-    
+
     # The candle that just closed (we're predicting the NEXT one)
     closed_candle_up = 1 if last_c["close"] > last_c["open"] else 0
-    
+
     result = {
-        "prediction": "UP 📈" if prediction == 1 else "DOWN 📉",
+        "prediction": "UP" if prediction == 1 else "DOWN",
         "direction_code": prediction,
         "probability_up": round(proba, 4),
         "confidence": round(confidence, 4),
         "threshold": threshold,
         "last_close": round(last_c["close"], 2),
         "prev_close": round(prev_c["close"], 2),
-        "closed_candle_up": closed_candle_up,  # result of last complete candle
+        "closed_candle_up": closed_candle_up,
         "rsi": round(last_c["rsi"], 2) if not np.isnan(last_c["rsi"]) else None,
         "macd_histogram": round(last_c["histogram"], 4) if not np.isnan(last_c["histogram"]) else None,
         "volume_ratio": round(last_c["volume_ratio"], 2) if not np.isnan(last_c["volume_ratio"]) else None,
@@ -95,7 +95,7 @@ def get_live_prediction():
         "atr_pct": round(last_c["atr_pct"], 4) if not np.isnan(last_c["atr_pct"]) else None,
         "timestamp": datetime.utcnow().isoformat(),
     }
-    
+
     return result, metrics
 
 
@@ -103,77 +103,158 @@ def get_next_slot_times():
     """Return (slot_open_str, slot_close_str, mins_until_open, secs_until_open)."""
     now = datetime.utcnow()
     next_open = now.replace(second=0, microsecond=0)
-    
+
     # Round up to next 5-min mark
     minute = next_open.minute
-    second = now.second
-    remainder = (minute % 5, second)
-    if remainder == (0, 0) and now.microsecond == 0:
+    remainder = minute % 5
+    if remainder == 0 and now.second == 0 and now.microsecond == 0:
         add_minutes = 0  # exactly on a 5-min boundary
     else:
-        add_minutes = 5 - (minute % 5)
-    
+        add_minutes = 5 - remainder if remainder != 0 else 5
+
     next_open = next_open + pd.Timedelta(minutes=add_minutes)
     next_close = next_open + pd.Timedelta(minutes=5)
-    
+
     slot_open_str = next_open.strftime("%H:%M UTC")
     slot_close_str = next_close.strftime("%H:%M UTC")
-    
+
     time_until = (next_open - now).total_seconds()
     mins = int(time_until // 60)
     secs = int(time_until % 60)
-    
+
     return slot_open_str, slot_close_str, mins, secs
 
 
 def format_signal_message(result, metrics=None, stats=None):
     """Format prediction as a Telegram message."""
-    direction = result["prediction"]
-    direction_str = "UP" if result["direction_code"] == 1 else "DOWN"
-    emoji = "🟢" if result["direction_code"] == 1 else "🔴"
-    
-    strength = "🔥 HIGH" if result["confidence"] >= 0.7 else \
-               "⚡ MEDIUM" if result["confidence"] >= 0.4 else \
-               "🌫️ LOW"
-    
+    direction_str = result["prediction"]
+    direction_emoji = "\U0001f4c8" if result["direction_code"] == 1 else "\U0001f4c9"
+    emoji = "\U0001f7e2" if result["direction_code"] == 1 else "\U0001f534"
+
+    strength = "HIGH" if result["confidence"] >= 0.7 else \
+               "MEDIUM" if result["confidence"] >= 0.4 else \
+               "LOW"
+
     slot_open, slot_close, mins, secs = get_next_slot_times()
     win_rate = metrics.get("validation_win_rate", 0) if metrics else 0
     ev = metrics.get("expected_value_per_dollar", 0) if metrics else 0
-    
+
     msg = (
-        f"⏰ BTC 5m Signal — {slot_open} → {slot_close}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"Direction: {direction}\n"
+        f"BTC 5m Signal -- {slot_open} -> {slot_close}\n"
+        f"---\n"
+        f"Direction: {direction_str} {direction_emoji}\n"
         f"Probability UP: {result['probability_up']:.1%}\n"
         f"Confidence: {result['confidence']:.1%}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Trade: ${TRADE_AMOUNT} → {direction_str}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Indicators:\n"
+        f"---\n"
+        f"Trade: ${TRADE_AMOUNT} -> {direction_str}\n"
+        f"---\n"
+        f"Indicators:\n"
         f"  RSI: {result['rsi']}\n"
         f"  MACD hist: {result['macd_histogram']}\n"
         f"  Vol ratio: {result['volume_ratio']}x\n"
         f"  BB pos: {result['bb_position']}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"⏱️  Expires in: {mins}m {secs}s\n"
+        f"---\n"
+        f"Expires in: {mins}m {secs}s\n"
         f"{strength} CONFIDENCE\n"
     )
-    
+
     if win_rate:
-        msg += f"📈 Model win rate: {win_rate:.1%}\n"
-        msg += f"💵 EV per $1: ${ev:.4f}\n"
-    
+        msg += f"Model win rate: {win_rate:.1%}\n"
+        msg += f"EV per $1: ${ev:.4f}\n"
+
     # Live stats if available
     if stats and stats["total"] > 0:
         msg += (
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"📊 Live Stats:\n"
+            f"---\n"
+            f"Live Stats:\n"
             f"  Trades: {stats['total']} | WR: {stats['win_rate']:.1%}\n"
             f"  P&L: ${stats['total_profit']:.2f}\n"
             f"  Streak: {stats['current_streak']} {stats['current_streak_type'].upper() if stats['current_streak_type'] else ''}"
         )
-    
+
     return msg
+
+
+# ─── Trade resolution (shared) ──────────────────────────────────────────────────
+
+def resolve_pending_trades():
+    """
+    Resolve ALL expired unresolved trades by fetching candle data and
+    matching on exact 5-min aligned timestamps.
+    """
+    now = datetime.utcnow()
+    tracker_data = load_tracker()
+    unresolved = [
+        t for t in tracker_data.get("trades", [])
+        if not t.get("resolved")
+    ]
+
+    if not unresolved:
+        return
+
+    # Filter to trades whose slot has closed
+    expired = []
+    for trade in unresolved:
+        slot_close_dt = _parse_slot_time(trade["slot_close"])
+        if now >= slot_close_dt:
+            expired.append(trade)
+
+    if not expired:
+        return
+
+    # Fetch candles once for all resolutions
+    live_df = fetch_live_candles(lookback=100)
+
+    for trade in expired:
+        # Build the exact expected open timestamp for this trade's slot
+        slot_open_dt = _parse_slot_time(trade["slot_open"])
+        open_ts_ms = int(slot_open_dt.timestamp() * 1000)
+
+        # Exact match: find the candle whose timestamp == slot open
+        matched = live_df[live_df["timestamp"] == open_ts_ms]
+
+        if matched.empty:
+            # Fallback: allow up to 1 minute tolerance for exchange timestamp drift
+            tolerance_ms = 60_000
+            close_matches = live_df[
+                (live_df["timestamp"] >= open_ts_ms - tolerance_ms) &
+                (live_df["timestamp"] <= open_ts_ms + tolerance_ms)
+            ]
+            if close_matches.empty:
+                log.warning(
+                    f"Could not find candle for trade {trade['id']} "
+                    f"(slot_open={trade['slot_open']}). Skipping."
+                )
+                continue
+            matched = close_matches.iloc[[0]]
+        else:
+            matched = matched.iloc[[0]]
+
+        candle = matched.iloc[0]
+        outcome_code = 1 if candle["close"] > candle["open"] else 0
+
+        resolved = resolve_trade(trade["id"], outcome_code)
+        if resolved:
+            log.info(f"Resolved trade {trade['id']}: {resolved['result']}")
+
+
+def _parse_slot_time(slot_str):
+    """
+    Parse 'HH:MM UTC' string to today's datetime (UTC).
+    If the parsed time is in the future by more than 12 hours,
+    assume it was yesterday (handles midnight crossover).
+    """
+    t = datetime.strptime(slot_str, "%H:%M UTC")
+    today = datetime.utcnow().date()
+    dt = datetime.combine(today, t.time())
+
+    now = datetime.utcnow()
+    # Handle midnight crossover: if slot time is far in the future,
+    # it was likely from yesterday
+    if (dt - now).total_seconds() > 12 * 3600:
+        dt = dt - pd.Timedelta(days=1)
+
+    return dt
 
 
 # ─── Telegram Bot ───────────────────────────────────────────────────────────────
@@ -182,9 +263,9 @@ def run_bot():
     from telegram import Update
     from telegram.ext import (
         Application, CommandHandler, MessageHandler,
-        filters, ContextTypes, JobQueue
+        filters, ContextTypes
     )
-    
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set!")
         return
@@ -193,73 +274,49 @@ def run_bot():
     from src.provision import provision, check_healthy
     if not check_healthy():
         log.info("Data or model missing — provisioning on startup...")
-        provision(verbose=False)  # silent, logs already go to file
+        provision(verbose=False)
     else:
         log.info("Data and model present — starting bot...")
 
-    # ── Build & start ────────────────────────────────────────────────────────
-    
+    # ── Command handlers ─────────────────────────────────────────────────────
+
     async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "🤖 *BTC 5-Min Signal Bot*\n\n"
+            "BTC 5-Min Signal Bot\n\n"
             "XGBoost ML-powered BTC direction predictions.\n\n"
             "/signal - Get a live prediction\n"
             "/stats - Live win/loss tracker\n"
             "/status - Model accuracy stats\n"
-            "/help - Help",
-            parse_mode="Markdown"
+            "/accuracy - Detailed accuracy report\n"
+            "/help - Help"
         )
-    
+
     async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "📖 *Help*\n\n"
+            "Help\n\n"
             "/signal - Live prediction\n"
             "/stats - Win/loss tracker\n"
-            "/status - Model stats\n\n"
-            "Auto-signals every 5 min! 🕐"
+            "/status - Model stats\n"
+            "/accuracy - Detailed accuracy report\n\n"
+            "Auto-signals every 5 min!"
         )
-    
+
     async def signal_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
-            await update.message.reply_text("🔄 Fetching latest data...")
-            
-            now = datetime.utcnow()
-            
+            await update.message.reply_text("Fetching latest data...")
+
             # Resolve ALL expired unresolved trades first
-            def parse_slot_close(slot_close_str):
-                t = datetime.strptime(slot_close_str, "%H:%M UTC")
-                today = datetime.utcnow().date()
-                return datetime.combine(today, t.time())
-            
-            tracker_data = load_tracker()
-            for trade in tracker_data.get("trades", []):
-                if trade.get("resolved"):
-                    continue
-                slot_close_dt = parse_slot_close(trade["slot_close"])
-                if now < slot_close_dt:
-                    continue
-                
-                live_df = fetch_live_candles(lookback=50)
-                live_df_feat = compute_features(live_df.copy())
-                open_time = datetime.strptime(trade["slot_open"], "%H:%M UTC")
-                open_today = datetime.combine(datetime.utcnow().date(), open_time.time())
-                open_ts = int(open_today.timestamp() * 1000)
-                live_df_feat["ts_diff"] = abs(live_df_feat["timestamp"] - open_ts)
-                matched = live_df_feat.loc[live_df_feat["ts_diff"].idxmin()]
-                outcome_code = 1 if matched["close"] > matched["open"] else 0
-                resolved = resolve_trade(trade["id"], outcome_code)
-                if resolved:
-                    log.info(f"Resolved trade {trade['id']}: {resolved['result']}")
-            
+            resolve_pending_trades()
+
             # Get new prediction
             pred_result, metrics = get_live_prediction()
             stats = get_stats()
             slot_open, slot_close, _, _ = get_next_slot_times()
-            
+
             trade = record_signal(
                 slot_open_time=slot_open,
                 slot_close_time=slot_close,
-                direction="UP" if pred_result["direction_code"] == 1 else "DOWN",
+                direction=pred_result["prediction"],
                 direction_code=pred_result["direction_code"],
                 probability_up=pred_result["probability_up"],
                 confidence=pred_result["confidence"],
@@ -269,31 +326,31 @@ def run_bot():
                 volume_ratio=pred_result["volume_ratio"],
             )
             log.info(f"New signal recorded: id={trade['id']}, {trade['direction']}")
-            
+
             msg = format_signal_message(pred_result, metrics, stats)
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            
+            await update.message.reply_text(msg)
+
             stats_msg = format_stats_message()
-            await update.message.reply_text(stats_msg, parse_mode="Markdown")
-            
+            await update.message.reply_text(stats_msg)
+
         except Exception as e:
             log.error(f"Signal error: {e}")
             import traceback
             log.error(traceback.format_exc())
-            await update.message.reply_text(f"❌ Error: {e}")
-    
+            await update.message.reply_text(f"Error: {e}")
+
     async def stats_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             msg = format_stats_message()
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            
+            await update.message.reply_text(msg)
+
             recent = format_recent_trades_message(5)
             if recent:
-                await update.message.reply_text(recent, parse_mode="Markdown")
+                await update.message.reply_text(recent)
         except Exception as e:
             log.error(f"Stats error: {e}")
-            await update.message.reply_text(f"❌ Error: {e}")
-    
+            await update.message.reply_text(f"Error: {e}")
+
     async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             _, metrics = load_model()
@@ -303,92 +360,137 @@ def run_bot():
             ev = metrics.get("expected_value_per_dollar", 0)
             total_trades = metrics.get("total_validation_trades", 0)
             training_samples = metrics.get("training_samples", 0)
-            
+
             model_date = datetime.fromtimestamp(
                 os.path.getmtime(MODEL_PATH)
             ).strftime("%Y-%m-%d %H:%M") if os.path.exists(MODEL_PATH) else "Unknown"
-            
+
             status = (
-                "📊 *Model Status*\n"
-                "━━━━━━━━━━━━━━━━━━\n"
+                "Model Status\n"
+                "---\n"
                 f"Model trained: {model_date}\n"
                 f"Training samples: {training_samples:,}\n"
                 f"Validation trades: {total_trades:,}\n"
-                "━━━━━━━━━━━━━━━━━━\n"
+                "---\n"
                 f"Validation Accuracy: {val_acc:.2%}\n"
                 f"Validation AUC: {val_auc:.4f}\n"
                 f"Win Rate (UP): {win_rate:.2%}\n"
                 f"Threshold: {metrics.get('threshold', PREDICTION_THRESHOLD):.3f}\n"
                 f"Expected Value: ${ev:.4f}/trade\n"
-                "━━━━━━━━━━━━━━━━━━\n"
+                "---\n"
             )
-            status += "✅ Model is profitable!" if val_acc >= 0.52 else "⚠️ Below breakeven"
-            
-            await update.message.reply_text(status, parse_mode="Markdown")
+            status += "Model is profitable!" if val_acc >= 0.52 else "Below breakeven"
+
+            await update.message.reply_text(status)
         except Exception as e:
             log.error(f"Status error: {e}")
-            await update.message.reply_text(f"❌ Error: {e}")
-    
+            await update.message.reply_text(f"Error: {e}")
+
+    async def accuracy_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Detailed accuracy report based on live trade history."""
+        try:
+            # Resolve any pending trades first
+            resolve_pending_trades()
+
+            tracker_data = load_tracker()
+            trades = tracker_data.get("trades", [])
+            resolved_trades = [t for t in trades if t.get("resolved")]
+
+            if not resolved_trades:
+                await update.message.reply_text("No resolved trades yet. Place some trades first!")
+                return
+
+            total = len(resolved_trades)
+            wins = sum(1 for t in resolved_trades if t["result"] == "WIN")
+            losses = total - wins
+            win_rate = wins / total if total > 0 else 0
+
+            # Breakdown by confidence level
+            high_conf = [t for t in resolved_trades if t.get("confidence", 0) >= 0.7]
+            med_conf = [t for t in resolved_trades if 0.4 <= t.get("confidence", 0) < 0.7]
+            low_conf = [t for t in resolved_trades if t.get("confidence", 0) < 0.4]
+
+            def calc_wr(trades_list):
+                if not trades_list:
+                    return 0, 0
+                w = sum(1 for t in trades_list if t["result"] == "WIN")
+                return w / len(trades_list), len(trades_list)
+
+            high_wr, high_n = calc_wr(high_conf)
+            med_wr, med_n = calc_wr(med_conf)
+            low_wr, low_n = calc_wr(low_conf)
+
+            # Breakdown by direction
+            up_trades = [t for t in resolved_trades if t["direction_code"] == 1]
+            down_trades = [t for t in resolved_trades if t["direction_code"] == 0]
+            up_wr, up_n = calc_wr(up_trades)
+            down_wr, down_n = calc_wr(down_trades)
+
+            # P&L
+            total_profit = sum(t.get("profit", 0) for t in resolved_trades)
+            ev_per_trade = total_profit / total if total > 0 else 0
+
+            # Model metrics
+            _, metrics = load_model()
+
+            msg = (
+                "Detailed Accuracy Report\n"
+                "===\n"
+                f"Total resolved trades: {total}\n"
+                f"Wins: {wins} | Losses: {losses}\n"
+                f"Live Win Rate: {win_rate:.1%}\n"
+                f"Total P&L: ${total_profit:.2f}\n"
+                f"EV per trade: ${ev_per_trade:.4f}\n"
+                "---\n"
+                "By Confidence:\n"
+                f"  HIGH (>=70%):   {high_wr:.1%} ({high_n} trades)\n"
+                f"  MEDIUM (40-70%): {med_wr:.1%} ({med_n} trades)\n"
+                f"  LOW (<40%):     {low_wr:.1%} ({low_n} trades)\n"
+                "---\n"
+                "By Direction:\n"
+                f"  UP signals:   {up_wr:.1%} ({up_n} trades)\n"
+                f"  DOWN signals: {down_wr:.1%} ({down_n} trades)\n"
+                "---\n"
+                "Model Validation:\n"
+                f"  Accuracy: {metrics.get('validation_accuracy', 0):.2%}\n"
+                f"  AUC: {metrics.get('validation_auc', 0):.4f}\n"
+                f"  Threshold: {metrics.get('threshold', PREDICTION_THRESHOLD):.3f}\n"
+            )
+
+            breakeven = 1 / (1 + 0.96)
+            if win_rate >= breakeven:
+                msg += f"\nProfitable! (breakeven = {breakeven:.1%})"
+            else:
+                msg += f"\nBelow breakeven ({breakeven:.1%})"
+
+            await update.message.reply_text(msg)
+
+        except Exception as e:
+            log.error(f"Accuracy error: {e}")
+            import traceback
+            log.error(traceback.format_exc())
+            await update.message.reply_text(f"Error: {e}")
+
     async def unknown_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("❓ Try /start, /signal, /stats, or /status.")
-    
+        await update.message.reply_text("Try /start, /signal, /stats, /status, or /accuracy.")
+
     # ── Auto-signal job ──────────────────────────────────────────────────────
-    
-    def parse_slot_close(slot_close_str):
-        """Parse 'HH:MM UTC' string to today's datetime (UTC)."""
-        t = datetime.strptime(slot_close_str, "%H:%M UTC")
-        today = datetime.utcnow().date()
-        return datetime.combine(today, t.time(), tzinfo=None)
-    
+
     async def send_auto_signal(app):
         try:
-            now = datetime.utcnow()
-            
-            # 1. Get prediction FIRST (uses latest complete candle)
+            # 1. Resolve ALL unresolved trades that have expired
+            resolve_pending_trades()
+
+            # 2. Get prediction (uses latest complete candle)
             pred_result, metrics = get_live_prediction()
             stats = get_stats()
             slot_open, slot_close_str, _, _ = get_next_slot_times()
-            
-            # 2. Resolve ALL unresolved trades that have expired
-            tracker_data = load_tracker()
-            for trade in tracker_data.get("trades", []):
-                if trade.get("resolved"):
-                    continue
-                
-                slot_close_dt = parse_slot_close(trade["slot_close"])
-                
-                if now < slot_close_dt:
-                    continue  # candle hasn't closed yet, skip
-                
-                # Candle has closed — fetch it to determine outcome
-                # We predicted for slot_open → slot_close
-                # At slot_close, the candle from slot_open has closed
-                # e.g. slot_open="11:45", slot_close="11:50"
-                # We need to check: did the 11:45-11:50 candle go UP or DOWN?
-                live_df = fetch_live_candles(lookback=50)
-                live_df_feat = compute_features(live_df.copy())
-                
-                # Find the candle that matches slot_open time
-                # slot_open like "11:45 UTC" — parse the time
-                open_time = datetime.strptime(trade["slot_open"], "%H:%M UTC")
-                open_today = datetime.combine(datetime.utcnow().date(), open_time.time())
-                open_ts = int(open_today.timestamp() * 1000)
-                
-                # Find this candle in the dataframe (closest timestamp)
-                live_df_feat["ts_diff"] = abs(live_df_feat["timestamp"] - open_ts)
-                matched = live_df_feat.loc[live_df_feat["ts_diff"].idxmin()]
-                
-                outcome_code = 1 if matched["close"] > matched["open"] else 0
-                
-                resolved = resolve_trade(trade["id"], outcome_code)
-                if resolved:
-                    log.info(f"Resolved trade {trade['id']}: {resolved['result']}")
-            
+
             # 3. Record new signal for the next window
             trade = record_signal(
                 slot_open_time=slot_open,
                 slot_close_time=slot_close_str,
-                direction="UP" if pred_result["direction_code"] == 1 else "DOWN",
+                direction=pred_result["prediction"],
                 direction_code=pred_result["direction_code"],
                 probability_up=pred_result["probability_up"],
                 confidence=pred_result["confidence"],
@@ -397,38 +499,38 @@ def run_bot():
                 macd_histogram=pred_result["macd_histogram"],
                 volume_ratio=pred_result["volume_ratio"],
             )
-            
+
             # 4. Send signal message
             msg = format_signal_message(pred_result, metrics, stats)
             await app.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=msg,
-                parse_mode="Markdown"
             )
             log.info(f"Auto-signal sent: id={trade['id']}, {pred_result['prediction']}, prob={pred_result['probability_up']:.4f}")
-            
+
         except Exception as e:
             log.error(f"Auto-signal error: {e}")
             import traceback
             log.error(traceback.format_exc())
-    
+
     # ── Build & start ────────────────────────────────────────────────────────
-    
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
+
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("signal", signal_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("accuracy", accuracy_cmd))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
-    
+
     app.job_queue.run_repeating(
         send_auto_signal,
         interval=300,  # 5 minutes
         first=10
     )
-    
+
     log.info("Bot started with tracker enabled.")
     app.run_polling()
 

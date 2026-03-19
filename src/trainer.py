@@ -226,7 +226,7 @@ def run_training(days_train=120, days_val=30, threshold=None):
         "validation_samples": len(X_val),
         "feature_importance": importance.nlargest(15).to_dict(),
     }
-    metrics_path = MODEL_PATH.replace(".json", "_metrics.json")
+    metrics_path = str(MODEL_PATH).replace(".json", "_metrics.json")
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2, default=str)
     print(f"    Metrics saved to {metrics_path}")

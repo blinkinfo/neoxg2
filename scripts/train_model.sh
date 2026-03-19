@@ -9,6 +9,6 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 echo "🤖 Training XGBoost model..."
-python -m src.trainer --days-train 150 --days-val 30
+python -m src.trainer --days-train 120 --days-val 30
 
 echo "✅ Training complete. Model saved to models/"

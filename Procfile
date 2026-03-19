@@ -1,1 +1,1 @@
-python -m src.telegram_bot
+worker: python -m src.telegram_bot
