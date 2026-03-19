@@ -48,19 +48,40 @@ def _pnl_display(amount: float) -> str:
     return f"-${abs(amount):.2f}"
 
 
-def _bar(value: float, width: int = 12) -> str:
-    """Unicode block bar for visual meters (0.0 to 1.0)."""
+def _pnl_emoji(amount: float) -> str:
+    """P&L with emoji prefix."""
+    if amount > 0:
+        return f"\U0001f4b0 +${amount:.2f}"
+    elif amount < 0:
+        return f"\U0001f534 -${abs(amount):.2f}"
+    return "\u26aa $0.00"
+
+
+def _bar(value: float, width: int = 10) -> str:
+    """Green/gray square bar for visual meters (0.0 to 1.0)."""
     filled = round(value * width)
     empty = width - filled
-    return "\u2593" * filled + "\u2591" * empty
+    return "\U0001f7e9" * filled + "\u2b1c" * empty
 
 
-def _streak_icon(streak_type: str) -> str:
-    if streak_type and streak_type.lower() == "win":
-        return "\u25b2"  # triangle up
-    elif streak_type and streak_type.lower() == "loss":
-        return "\u25bc"  # triangle down
-    return "\u2014"  # em dash
+def _streak_display(streak: int, streak_type: str) -> str:
+    """Streak with emoji."""
+    if not streak_type:
+        return "\u2796 No streak"
+    if streak_type.lower() == "win":
+        return f"\U0001f525 {streak}W streak"
+    return f"\U0001f9ca {streak}L streak"
+
+
+def _verdict_line(win_rate: float) -> str:
+    """Profitability verdict with emoji."""
+    breakeven = 1 / (1 + PAYOUT)
+    if win_rate >= breakeven + 0.05:
+        return "\U0001f4b9 <b>PROFITABLE</b>"
+    elif win_rate >= breakeven:
+        return "\u2696\ufe0f <b>BREAKEVEN</b>"
+    else:
+        return "\U0001f4c9 <b>BELOW BREAKEVEN</b>"
 
 
 # ── Persistence ───────────────────────────────────────────────────────────────
@@ -199,16 +220,16 @@ def get_recent_trades(n: int = 10) -> list:
 # ── Formatting (HTML) ─────────────────────────────────────────────────────────
 
 def format_stats_message() -> str:
-    """Session stats card for /stats — HTML formatted."""
+    """Session stats card for /stats -- emoji-rich HTML."""
     stats = get_stats()
     total = stats["total"]
 
     if total == 0:
         return (
-            "<b>\u2593 Session Tracker</b>\n"
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
-            "No resolved trades yet.\n\n"
-            "<i>Auto-signals fire every 5 min.\n"
+            "\U0001f4ca  <b>Session Tracker</b>\n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            "\U0001f4ed  No resolved trades yet.\n\n"
+            "\U0001f552  <i>Auto-signals fire every 5 min.\n"
             "Trades resolve when their candle closes.\n"
             "Check back in a few minutes!</i>"
         )
@@ -218,55 +239,47 @@ def format_stats_message() -> str:
     ev_pt  = pnl / total
     stype  = stats["current_streak_type"] or ""
     sk     = stats["current_streak"]
-    sk_icon = _streak_icon(stype)
 
-    # Win rate bar
-    wr_bar = _bar(wr)
-
-    breakeven = 1 / (1 + PAYOUT)
-    if wr >= breakeven:
-        verdict = "\u25cf PROFITABLE"
-    else:
-        verdict = "\u25cf BELOW BREAKEVEN"
+    wr_bar  = _bar(wr)
+    verdict = _verdict_line(wr)
 
     lines = [
-        "<b>\u2593 Session Tracker</b>",
-        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        "\U0001f4ca  <b>Session Tracker</b>",
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         "",
-        f"  <b>{_pnl_display(pnl)}</b>  Total P&amp;L",
-        f"  {wr_bar}  <b>{wr:.1%}</b>  Win Rate",
+        f"      {_pnl_emoji(pnl)}  Total P&amp;L",
+        f"      {wr_bar}  <b>{wr:.1%}</b>  Win Rate",
+        f"      {verdict}",
         "",
-        "<b>Record</b>",
+        "\U0001f4c8  <b>Record</b>",
         "<code>"
         f"  Trades          {total}\n"
-        f"  Wins            {stats['wins']}\n"
-        f"  Losses          {stats['losses']}\n"
+        f"  Wins            {stats['wins']}  \u2713\n"
+        f"  Losses          {stats['losses']}  \u2717\n"
         f"  EV per trade    {ev_pt:+.4f}"
         "</code>",
         "",
-        "<b>Streaks</b>",
+        "\U0001f525  <b>Streaks</b>",
         "<code>"
-        f"  Current         {sk_icon} {sk} {stype.upper() if stype else '--'}\n"
+        f"  Current         {_streak_display(sk, stype)}\n"
         f"  Best win        {stats['max_win_streak']}\n"
         f"  Worst loss      {stats['max_loss_streak']}"
         "</code>",
         "",
-        f"<b>Payout</b>  +${PAYOUT:.2f} (win)  /  -$1.00 (loss)",
-        "",
-        f"<b>{verdict}</b>",
+        f"\U0001f4b5  <b>Payout:</b>  +${PAYOUT:.2f} (win)  /  -$1.00 (loss)",
     ]
     return "\n".join(lines)
 
 
 def format_recent_trades_message(n: int = 5) -> str:
-    """Last N trades as a formatted list — HTML."""
+    """Last N trades as a formatted list -- emoji-rich HTML."""
     trades = get_recent_trades(n)
     if not trades:
         return ""
 
     lines = [
-        "<b>\u23f1 Recent Trades</b>",
-        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        "\U0001f4dc  <b>Recent Trades</b>",
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
         "",
     ]
 
@@ -276,24 +289,29 @@ def format_recent_trades_message(n: int = 5) -> str:
         direc = t["direction"]
         tid   = t["id"]
 
+        if direc == "UP":
+            dir_icon = "\U0001f53c"
+        else:
+            dir_icon = "\U0001f53d"
+
         if t["resolved"]:
             if t["result"] == "WIN":
-                icon   = "\u2713"  # checkmark
+                result_icon = "\u2705"
                 profit = t["profit"]
                 result_str = f"<b>{_pnl_display(profit)}</b>"
             else:
-                icon   = "\u2717"  # x mark
+                result_icon = "\u274c"
                 profit = t["profit"]
                 result_str = f"{_pnl_display(profit)}"
 
             lines.append(
-                f"  {icon}  <code>#{tid:>3}</code>  {slot}  "
-                f"<b>{direc:<4}</b>  {prob:.0%}  {result_str}"
+                f"  {result_icon}  <code>#{tid:>3}</code>  {slot}  "
+                f"{dir_icon} <b>{direc:<4}</b>  {prob:.0%}  {result_str}"
             )
         else:
             lines.append(
-                f"  \u25cb  <code>#{tid:>3}</code>  {slot}  "
-                f"<b>{direc:<4}</b>  {prob:.0%}  <i>pending</i>"
+                f"  \u23f3  <code>#{tid:>3}</code>  {slot}  "
+                f"{dir_icon} <b>{direc:<4}</b>  {prob:.0%}  <i>pending...</i>"
             )
 
     return "\n".join(lines)
