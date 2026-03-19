@@ -1,0 +1,48 @@
+# Environment & secrets
+.env
+*.env
+secrets/
+.env.local
+.env.production
+
+# Data & models (generated)
+data/*.csv
+models/*.json
+models/*.pkl
+*.pkl
+*.pickle
+
+# Logs
+logs/*.log
+logs/*.jsonl
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+venv/
+env/
+.venv/
+ENV/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.temp
+*.bak
