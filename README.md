@@ -4,16 +4,42 @@ AI-powered BTC 5-minute candle direction prediction bot. Predicts whether the ne
 
 ---
 
+## 🚀 One-Command Deploy to Railway
+
+**Just set 2 environment variables and deploy — no manual setup needed.**
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new?template=https://github.com/blinkinfo/neoxg)
+
+Or connect your GitHub repo at [railway.app](https://railway.app).
+
+**Required environment variables** (in Railway dashboard → Variables):
+```
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+```
+
+**Start command:**
+```bash
+cd neoxg && pip install -r requirements.txt && python -m src.telegram_bot
+```
+
+**That's it.** On first deploy, the bot automatically:
+1. Fetches ~90 days of BTC 5-min candles from MEXC
+2. Trains the XGBoost model (~1-2 minutes)
+3. Starts sending Telegram signals every 5 minutes
+
+---
+
 ## 🏗️ Architecture
 
 ```
-Binance / MEXC  (5m candles)
+MEXC  (5m candles)
        ↓
-Data Fetcher  →  Feature Engineer  →  XGBoost Predictor
-                                            ↓
-                                   Telegram Bot (signals)
-                                            ↓
-                                   Polymarket (auto-trade)
+Data Fetcher → Feature Engineer → XGBoost Predictor
+                                           ↓
+                                  Telegram Bot (signals)
+                                           ↓
+                                  Polymarket (auto-trade)
 ```
 
 ---
@@ -24,32 +50,33 @@ Data Fetcher  →  Feature Engineer  →  XGBoost Predictor
 neoxg/
 ├── src/
 │   ├── __init__.py
-│   ├── config.py          # All settings — edit this
-│   ├── data_fetcher.py    # MEXC candle fetching
-│   ├── features.py         # RSI, MACD, BB, momentum, ATR
-│   ├── trainer.py          # XGBoost training + backtesting
-│   ├── predictor.py        # Live prediction engine
-│   ├── tracker.py          # Win/loss tracking
-│   └── telegram_bot.py     # Telegram bot with auto-signals
+│   ├── config.py          # All settings
+│   ├── provision.py       # Auto-fetch + auto-train on startup
+│   ├── data_fetcher.py   # MEXC candle fetching
+│   ├── features.py       # RSI, MACD, BB, momentum, ATR
+│   ├── trainer.py        # XGBoost training + backtesting
+│   ├── predictor.py      # Live prediction engine
+│   ├── tracker.py        # Win/loss tracking
+│   └── telegram_bot.py   # Telegram bot with auto-signals
 ├── scripts/
-│   ├── fetch_data.sh       # Fetch historical candles
-│   ├── train_model.sh      # Train XGBoost model
-│   └── run_bot.sh          # Launch Telegram bot
+│   ├── fetch_data.sh     # Fetch historical candles
+│   ├── train_model.sh    # Train XGBoost model
+│   └── run_bot.sh        # Launch Telegram bot
 ├── tests/
-│   └── test_features.py    # Feature engineering tests
-├── data/                   # Candle data + model output (gitignored)
-├── models/                 # Saved models (gitignored)
-├── logs/                   # Logs (gitignored)
+│   └── test_features.py
+├── data/                 # Candle data (gitignored)
+├── models/               # Saved models (gitignored)
+├── logs/                 # Logs (gitignored)
 ├── requirements.txt
-├── .env.example            # Template for secrets
+├── .env.example
 ├── .gitignore
 ├── README.md
-└── Railway.md              # Railway deployment guide
+└── Railway.md
 ```
 
 ---
 
-## 🚀 Quick Start
+## 💻 Local Development
 
 ### 1. Clone & Install
 
@@ -63,33 +90,16 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env with your secrets
+# Edit .env with your Telegram bot token and chat ID
 ```
 
-**Required variables in `.env`:**
-```env
-# Telegram Bot (get from @BotFather)
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-
-# Polymarket (for auto-trading — optional)
-POLYMARKET_PRIVATE_KEY=your_wallet_private_key
-POLYMARKET_API_KEY=your_api_key
-POLYMARKET_API_SECRET=your_api_secret
-```
-
-### 3. Fetch Data & Train
+### 3. Run
 
 ```bash
-python -m src.data_fetcher   # Fetch 180 days of BTC candles
-python -m src.trainer         # Train XGBoost model
+python -m src.telegram_bot
 ```
 
-### 4. Run
-
-```bash
-python -m src.telegram_bot    # Start Telegram bot
-```
+On first run, it auto-fetches candles and trains the model automatically.
 
 ---
 
@@ -97,14 +107,14 @@ python -m src.telegram_bot    # Start Telegram bot
 
 - **Algorithm:** XGBoost binary classifier
 - **Features (30):** RSI, MACD, Bollinger Bands, momentum, volume ratio, ATR, candlestick patterns, time features
-- **Training data:** 150 days of 5-min BTC/USDT candles from MEXC
+- **Training data:** ~60 days of 5-min BTC/USDT candles from MEXC (auto-provisioned)
 - **Validation:** 30 days held out
-- **Validation accuracy:** ~52.4% (profitable with 96¢ payout)
+- **Expected accuracy:** ~52% (profitable with 96¢ payout)
 - **Expected value:** ~$0.016 per $1 trade
 
 ---
 
-## 🔧 Commands (Telegram Bot)
+## 🔧 Telegram Commands
 
 | Command | Description |
 |---------|-------------|
@@ -127,15 +137,12 @@ All settings in `src/config.py`:
 |----------|---------|-------------|
 | `TRADE_AMOUNT` | `$1` | Amount per trade |
 | `PREDICTION_THRESHOLD` | `0.52` | Min probability to signal UP |
-| `RSI_PERIOD` | `14` | RSI lookback |
-| `MACD_FAST/SLOW/SIGNAL` | `12/26/9` | MACD parameters |
-| `BB_PERIOD` | `20` | Bollinger Bands period |
 
 ---
 
-## 🚂 Deployment (Railway)
+## 🚂 Railway Deployment
 
-See [Railway.md](Railway.md) for one-command Railway deployment.
+See [Railway.md](Railway.md) for full deployment details.
 
 ---
 

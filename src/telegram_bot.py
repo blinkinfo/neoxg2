@@ -188,7 +188,15 @@ def run_bot():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set!")
         return
-    
+
+    # ── Auto-provision data + model if missing ─────────────────────────────
+    from src.provision import provision, check_healthy
+    if not check_healthy():
+        log.info("Data or model missing — provisioning on startup...")
+        provision(verbose=False)  # silent, logs already go to file
+    else:
+        log.info("Data and model present — starting bot...")
+
     # ── Build & start ────────────────────────────────────────────────────────
     
     async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
