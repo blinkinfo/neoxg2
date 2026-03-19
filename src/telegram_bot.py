@@ -1,14 +1,17 @@
 """
 telegram_bot.py
 Signal bot — sends BTC 5-min direction predictions to Telegram.
-Runs as a long-polling bot with periodic auto-signals.
+Runs as a long-polling bot with candle-aligned auto-signals.
+
+Signals fire 15 seconds BEFORE each 5-min candle boundary so users
+have time to act before the slot opens.
 """
 
 import os
 import sys
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +31,11 @@ from src.tracker import (
     format_stats_message, format_recent_trades_message,
     load_tracker
 )
+
+# ─── Constants ─────────────────────────────────────────────────────────────────
+
+SIGNAL_LEAD_SECONDS = 15   # fire signal this many seconds before slot opens
+CANDLE_MINUTES = 5
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 
@@ -93,54 +101,72 @@ def get_live_prediction():
         "volume_ratio": round(last_c["volume_ratio"], 2) if not np.isnan(last_c["volume_ratio"]) else None,
         "bb_position": round(last_c["bb_position"], 2) if not np.isnan(last_c["bb_position"]) else None,
         "atr_pct": round(last_c["atr_pct"], 4) if not np.isnan(last_c["atr_pct"]) else None,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
     return result, metrics
 
 
-def get_next_slot_times():
-    """Return (slot_open_str, slot_close_str, mins_until_open, secs_until_open)."""
-    now = datetime.utcnow()
-    next_open = now.replace(second=0, microsecond=0)
+# ─── Candle-aligned slot computation ────────────────────────────────────────────
 
-    # Round up to next 5-min mark
-    minute = next_open.minute
-    remainder = minute % 5
+def _next_candle_boundary():
+    """
+    Return the next exact 5-min candle boundary as a timezone-aware
+    UTC datetime.  E.g. if now is 12:03:22 -> returns 12:05:00.
+    If now is exactly 12:05:00.000 -> returns 12:10:00.
+    """
+    now = datetime.now(timezone.utc)
+    # Truncate to current minute
+    base = now.replace(second=0, microsecond=0)
+    remainder = base.minute % CANDLE_MINUTES
     if remainder == 0 and now.second == 0 and now.microsecond == 0:
-        add_minutes = 0  # exactly on a 5-min boundary
+        # Exactly on boundary — next boundary is 5 min later
+        return base + timedelta(minutes=CANDLE_MINUTES)
     else:
-        add_minutes = 5 - remainder if remainder != 0 else 5
+        return base + timedelta(minutes=CANDLE_MINUTES - remainder)
 
-    next_open = next_open + pd.Timedelta(minutes=add_minutes)
-    next_close = next_open + pd.Timedelta(minutes=5)
 
-    slot_open_str = next_open.strftime("%H:%M UTC")
-    slot_close_str = next_close.strftime("%H:%M UTC")
+def get_next_slot_times():
+    """
+    Return (slot_open_iso, slot_close_iso, slot_open_display, slot_close_display,
+            mins_until_open, secs_until_open).
 
-    time_until = (next_open - now).total_seconds()
+    slot_open/close _iso  : full ISO-8601 strings for storage (no ambiguity)
+    slot_open/close _display : "HH:MM UTC" for human-readable messages
+    """
+    slot_open_dt = _next_candle_boundary()
+    slot_close_dt = slot_open_dt + timedelta(minutes=CANDLE_MINUTES)
+
+    now = datetime.now(timezone.utc)
+    time_until = (slot_open_dt - now).total_seconds()
     mins = int(time_until // 60)
     secs = int(time_until % 60)
 
-    return slot_open_str, slot_close_str, mins, secs
+    return (
+        slot_open_dt.strftime("%Y-%m-%dT%H:%M:%S"),   # ISO for storage
+        slot_close_dt.strftime("%Y-%m-%dT%H:%M:%S"),   # ISO for storage
+        slot_open_dt.strftime("%H:%M UTC"),              # display
+        slot_close_dt.strftime("%H:%M UTC"),             # display
+        mins,
+        secs,
+    )
 
 
 def format_signal_message(result, metrics=None, stats=None):
     """Format prediction as a Telegram message."""
     direction_str = result["prediction"]
     direction_emoji = "\U0001f4c8" if result["direction_code"] == 1 else "\U0001f4c9"
-    emoji = "\U0001f7e2" if result["direction_code"] == 1 else "\U0001f534"
 
     strength = "HIGH" if result["confidence"] >= 0.7 else \
                "MEDIUM" if result["confidence"] >= 0.4 else \
                "LOW"
 
-    slot_open, slot_close, mins, secs = get_next_slot_times()
+    _, _, slot_open_disp, slot_close_disp, mins, secs = get_next_slot_times()
     win_rate = metrics.get("validation_win_rate", 0) if metrics else 0
     ev = metrics.get("expected_value_per_dollar", 0) if metrics else 0
 
     msg = (
-        f"BTC 5m Signal -- {slot_open} -> {slot_close}\n"
+        f"BTC 5m Signal -- {slot_open_disp} -> {slot_close_disp}\n"
         f"---\n"
         f"Direction: {direction_str} {direction_emoji}\n"
         f"Probability UP: {result['probability_up']:.1%}\n"
@@ -182,7 +208,7 @@ def resolve_pending_trades():
     Resolve ALL expired unresolved trades by fetching candle data and
     matching on exact 5-min aligned timestamps.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     tracker_data = load_tracker()
     unresolved = [
         t for t in tracker_data.get("trades", [])
@@ -240,19 +266,32 @@ def resolve_pending_trades():
 
 def _parse_slot_time(slot_str):
     """
-    Parse 'HH:MM UTC' string to today's datetime (UTC).
-    If the parsed time is in the future by more than 12 hours,
-    assume it was yesterday (handles midnight crossover).
-    """
-    t = datetime.strptime(slot_str, "%H:%M UTC")
-    today = datetime.utcnow().date()
-    dt = datetime.combine(today, t.time())
+    Parse a slot time string to a timezone-aware UTC datetime.
 
-    now = datetime.utcnow()
-    # Handle midnight crossover: if slot time is far in the future,
-    # it was likely from yesterday
+    Supports two formats:
+      1. ISO-8601:  "2026-03-19T19:30:00"   (new, unambiguous)
+      2. Legacy:    "19:30 UTC"              (old trades — combined with today's date,
+                                              with midnight-crossover guard)
+    """
+    # ── Try ISO-8601 first (new format, always unambiguous) ─────────────────
+    if "T" in slot_str:
+        dt = datetime.strptime(slot_str, "%Y-%m-%dT%H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc)
+
+    # ── Legacy "HH:MM UTC" format ──────────────────────────────────────────
+    t = datetime.strptime(slot_str, "%H:%M UTC")
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    dt = datetime.combine(today, t.time(), tzinfo=timezone.utc)
+
+    # Midnight-crossover guard:
+    # If the parsed time is >12 hours in the future, it was probably yesterday.
     if (dt - now).total_seconds() > 12 * 3600:
-        dt = dt - pd.Timedelta(days=1)
+        dt -= timedelta(days=1)
+    # If the parsed time is >12 hours in the PAST, it's probably tomorrow.
+    # (e.g. now is 23:58, slot_close is "00:00 UTC" -> should be tomorrow)
+    elif (now - dt).total_seconds() > 12 * 3600:
+        dt += timedelta(days=1)
 
     return dt
 
@@ -311,11 +350,11 @@ def run_bot():
             # Get new prediction
             pred_result, metrics = get_live_prediction()
             stats = get_stats()
-            slot_open, slot_close, _, _ = get_next_slot_times()
+            slot_open_iso, slot_close_iso, _, _, _, _ = get_next_slot_times()
 
             trade = record_signal(
-                slot_open_time=slot_open,
-                slot_close_time=slot_close,
+                slot_open_time=slot_open_iso,
+                slot_close_time=slot_close_iso,
                 direction=pred_result["prediction"],
                 direction_code=pred_result["direction_code"],
                 probability_up=pred_result["probability_up"],
@@ -474,9 +513,25 @@ def run_bot():
     async def unknown_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Try /start, /signal, /stats, /status, or /accuracy.")
 
-    # ── Auto-signal job ──────────────────────────────────────────────────────
+    # ── Candle-aligned auto-signal job ───────────────────────────────────────
+    #
+    # Instead of run_repeating (which drifts from candle boundaries), we use
+    # run_once to schedule each signal exactly SIGNAL_LEAD_SECONDS before the
+    # next 5-min boundary.  After sending, the callback re-schedules itself
+    # for the following boundary.
+    #
+    # Timeline example (SIGNAL_LEAD_SECONDS = 15):
+    #   12:04:45  ->  signal fires (predicting 12:05-12:10 slot)
+    #   12:09:45  ->  signal fires (predicting 12:10-12:15 slot)
+    #   12:14:45  ->  signal fires (predicting 12:15-12:20 slot)
+    #
+    # The prediction uses the last *closed* candle from MEXC.  At 12:04:45
+    # the latest closed candle is 11:55-12:00 (the 12:00-12:05 candle is
+    # still open).  This is correct — the model was trained to predict the
+    # NEXT candle from the features of the last closed candle.
 
-    async def send_auto_signal(app):
+    async def send_auto_signal(ctx: ContextTypes.DEFAULT_TYPE):
+        """Candle-aligned signal callback. Sends signal then re-schedules."""
         try:
             # 1. Resolve ALL unresolved trades that have expired
             resolve_pending_trades()
@@ -484,12 +539,12 @@ def run_bot():
             # 2. Get prediction (uses latest complete candle)
             pred_result, metrics = get_live_prediction()
             stats = get_stats()
-            slot_open, slot_close_str, _, _ = get_next_slot_times()
+            slot_open_iso, slot_close_iso, _, _, _, _ = get_next_slot_times()
 
-            # 3. Record new signal for the next window
+            # 3. Record new signal for the upcoming slot
             trade = record_signal(
-                slot_open_time=slot_open,
-                slot_close_time=slot_close_str,
+                slot_open_time=slot_open_iso,
+                slot_close_time=slot_close_iso,
                 direction=pred_result["prediction"],
                 direction_code=pred_result["direction_code"],
                 probability_up=pred_result["probability_up"],
@@ -502,16 +557,51 @@ def run_bot():
 
             # 4. Send signal message
             msg = format_signal_message(pred_result, metrics, stats)
-            await app.bot.send_message(
+            await ctx.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=msg,
             )
-            log.info(f"Auto-signal sent: id={trade['id']}, {pred_result['prediction']}, prob={pred_result['probability_up']:.4f}")
+            log.info(
+                f"Auto-signal sent: id={trade['id']}, {pred_result['prediction']}, "
+                f"prob={pred_result['probability_up']:.4f}, "
+                f"slot={slot_open_iso}"
+            )
 
         except Exception as e:
             log.error(f"Auto-signal error: {e}")
             import traceback
             log.error(traceback.format_exc())
+
+        finally:
+            # Always re-schedule the next signal, even if this one errored
+            _schedule_next_signal(ctx.job.data["app"])
+
+    def _schedule_next_signal(app):
+        """
+        Schedule `send_auto_signal` to fire SIGNAL_LEAD_SECONDS before the
+        next 5-min candle boundary.
+        """
+        now = datetime.now(timezone.utc)
+        next_boundary = _next_candle_boundary()
+        fire_at = next_boundary - timedelta(seconds=SIGNAL_LEAD_SECONDS)
+
+        # If fire_at is already in the past (e.g. bot just started at XX:X4:50),
+        # skip to the boundary after that
+        if fire_at <= now:
+            next_boundary = next_boundary + timedelta(minutes=CANDLE_MINUTES)
+            fire_at = next_boundary - timedelta(seconds=SIGNAL_LEAD_SECONDS)
+
+        delay = (fire_at - now).total_seconds()
+        log.info(
+            f"Next signal scheduled for {fire_at.strftime('%H:%M:%S UTC')} "
+            f"(in {delay:.0f}s, slot {next_boundary.strftime('%H:%M UTC')})"
+        )
+
+        app.job_queue.run_once(
+            send_auto_signal,
+            when=delay,
+            data={"app": app},
+        )
 
     # ── Build & start ────────────────────────────────────────────────────────
 
@@ -525,13 +615,10 @@ def run_bot():
     app.add_handler(CommandHandler("accuracy", accuracy_cmd))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
-    app.job_queue.run_repeating(
-        send_auto_signal,
-        interval=300,  # 5 minutes
-        first=10
-    )
+    # Schedule the first candle-aligned signal
+    _schedule_next_signal(app)
 
-    log.info("Bot started with tracker enabled.")
+    log.info("Bot started with candle-aligned auto-signals.")
     app.run_polling()
 
 
