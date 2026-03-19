@@ -53,11 +53,11 @@ def provision(verbose=True):
     # ── Step 1: Fetch candles ────────────────────────────────────────────────
     if not candles_ok:
         if verbose:
-            print("📡 Fetching 90 days of BTC 5-min candles from MEXC...")
+            print("📡 Fetching 150 days of BTC 5-min candles from MEXC...")
         from src.data_fetcher import fetch_and_save
         t0 = time.time()
         try:
-            fetch_and_save(days=90)
+            fetch_and_save(days=150)
             if verbose:
                 print(f"   ✅ Candles saved in {time.time()-t0:.0f}s")
         except Exception as e:
@@ -75,8 +75,8 @@ def provision(verbose=True):
         from src.trainer import run_training
         t0 = time.time()
         try:
-            # Use 60 days train, 30 val — faster than full 150/30
-            model, metrics = run_training(days_train=60, days_val=30)
+            # Use 120 days train, 30 val — good balance of accuracy vs speed
+            model, metrics = run_training(days_train=120, days_val=30)
             if verbose:
                 print(f"   ✅ Model trained in {time.time()-t0:.0f}s")
                 print(f"   Validation accuracy: {metrics.get('validation_accuracy', 0):.2%}")
