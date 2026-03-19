@@ -1,4 +1,0 @@
-[start]
-cmd = "python -m src.telegram_bot"
-
-[env]
