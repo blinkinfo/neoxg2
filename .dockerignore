@@ -1,0 +1,12 @@
+.git
+.gitignore
+.pytest_cache
+__pycache__
+*.pyc
+.env
+data/*.csv
+models/*.json
+models/*.txt
+logs/*.log
+logs/*.jsonl
+*.md

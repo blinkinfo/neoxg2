@@ -26,8 +26,8 @@ pip install -r requirements.txt && python -m src.telegram_bot
 ## What Happens on First Deploy
 
 1. Railway starts the bot
-2. Bot detects no data/model → auto-fetches ~90 days of BTC candles from MEXC (~30 seconds)
-3. Auto-trains XGBoost model (~1-2 minutes)
+2. Bot detects no data/model → auto-fetches ~200 days of BTC candles from MEXC (~40 seconds)
+3. Auto-trains XGBoost + LightGBM ensemble model (~2-3 minutes)
 4. Starts sending Telegram signals every 5 minutes
 
 After that, it reads existing data — starts in seconds.

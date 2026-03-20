@@ -41,57 +41,57 @@ def provision(verbose=True):
 
     if candles_ok and model_ok:
         if verbose:
-            print("✅ Data and model already exist — skipping provisioning")
+            print("\u2705 Data and model already exist \u2014 skipping provisioning")
         return False
 
     if verbose:
-        print("🔧 First-time setup — provisioning data and model...")
-        print("   This will take ~2-3 minutes on first run")
-        print("   (90 days of candles + XGBoost training)")
+        print("\U0001f527 First-time setup \u2014 provisioning data and model...")
+        print("   This will take ~3-4 minutes on first run")
+        print("   (200 days of candles + XGBoost/LightGBM training)")
         print()
 
-    # ── Step 1: Fetch candles ────────────────────────────────────────────────
+    # \u2500\u2500 Step 1: Fetch candles \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if not candles_ok:
         if verbose:
-            print("📡 Fetching 150 days of BTC 5-min candles from MEXC...")
+            print("\U0001f4e1 Fetching 200 days of BTC 5-min candles from MEXC...")
         from src.data_fetcher import fetch_and_save
         t0 = time.time()
         try:
-            fetch_and_save(days=150)
+            fetch_and_save(days=200)
             if verbose:
-                print(f"   ✅ Candles saved in {time.time()-t0:.0f}s")
+                print(f"   \u2705 Candles saved in {time.time()-t0:.0f}s")
         except Exception as e:
             if verbose:
-                print(f"   ⚠️  Fetch failed: {e}")
+                print(f"   \u26a0\ufe0f  Fetch failed: {e}")
             raise
     else:
         if verbose:
-            print(f"✅ Candles already exist ({candles_path.stat().st_size//1024}KB)")
+            print(f"\u2705 Candles already exist ({candles_path.stat().st_size//1024}KB)")
 
-    # ── Step 2: Train model ─────────────────────────────────────────────────
+    # \u2500\u2500 Step 2: Train model \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     if not model_ok:
         if verbose:
-            print("🤖 Training XGBoost model (this takes ~1-2 minutes)...")
+            print("\U0001f916 Training XGBoost + LightGBM ensemble (this takes ~2-3 minutes)...")
         from src.trainer import run_training
         t0 = time.time()
         try:
-            # Use 120 days train, 30 val — good balance of accuracy vs speed
+            # Use 120 days train, 30 val \u2014 good balance of accuracy vs speed
             model, metrics = run_training(days_train=120, days_val=30)
             if verbose:
-                print(f"   ✅ Model trained in {time.time()-t0:.0f}s")
+                print(f"   \u2705 Model trained in {time.time()-t0:.0f}s")
                 print(f"   Validation accuracy: {metrics.get('validation_accuracy', 0):.2%}")
                 print(f"   Win rate: {metrics.get('validation_win_rate', 0):.2%}")
         except Exception as e:
             if verbose:
-                print(f"   ⚠️  Training failed: {e}")
+                print(f"   \u26a0\ufe0f  Training failed: {e}")
             raise
     else:
         if verbose:
-            print(f"✅ Model already exists")
+            print(f"\u2705 Model already exists")
 
     if verbose:
         print()
-        print("✅ Provisioning complete — starting bot...")
+        print("\u2705 Provisioning complete \u2014 starting bot...")
 
     return True
 

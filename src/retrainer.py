@@ -211,7 +211,7 @@ def run_retrain(force_accept: bool = False) -> dict:
         # ── Fetch fresh data ───────────────────────────────────────────
         log.info("Retrain: fetching fresh candle data...")
         from src.data_fetcher import fetch_and_save
-        fetch_and_save(days=150)
+        fetch_and_save(days=200)
         log.info("Retrain: fresh data fetched.")
 
         # ── Train new model to temp path ───────────────────────────────
