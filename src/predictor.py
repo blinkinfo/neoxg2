@@ -1,7 +1,8 @@
 """
 predictor.py
-Live prediction script — runs every 5 mins.
-Fetches latest candles from MEXC, computes features, predicts direction, logs result.
+Live prediction script -- runs every 5 mins.
+Fetches latest candles + microstructure data from MEXC,
+computes features, predicts direction using XGBoost + LightGBM ensemble.
 """
 
 import os
@@ -12,10 +13,17 @@ from pathlib import Path
 from datetime import datetime
 
 from src.config import (
-    MODEL_PATH, DATA_DIR, LOGS_DIR, PREDICTION_THRESHOLD,
-    MEXC_SYMBOL, MEXC_INTERVAL
+    MODEL_PATH, LIGHTGBM_MODEL_PATH, DATA_DIR, LOGS_DIR,
+    PREDICTION_THRESHOLD, MEXC_SYMBOL, MEXC_INTERVAL,
+    ORDERBOOK_DEPTH, FUNDING_RATE_SYMBOL,
+    ENSEMBLE_WEIGHTS, MIN_CONFIDENCE_TO_TRADE,
+    HIGH_CONFIDENCE_THRESHOLD,
+    VOLATILITY_REGIME_LOOKBACK, LOW_VOLATILITY_ATR_PERCENTILE,
 )
-from src.data_fetcher import fetch_live_candles
+from src.data_fetcher import (
+    fetch_live_candles, fetch_order_book_imbalance,
+    fetch_funding_rate, fetch_open_interest_mexc,
+)
 from src.features import compute_features, prepare_ml_data
 
 
@@ -36,15 +44,52 @@ def load_model():
     return model, metrics
 
 
-def predict_direction(model, df, threshold=None):
+def load_lgb_model():
+    """Load trained LightGBM model. Returns None if not available."""
+    try:
+        import lightgbm as lgb
+        if not os.path.exists(LIGHTGBM_MODEL_PATH):
+            return None
+        model = lgb.Booster(model_file=str(LIGHTGBM_MODEL_PATH))
+        return model
+    except Exception as e:
+        print(f"LightGBM model load failed: {e}")
+        return None
+
+
+def ensemble_predict(xgb_model, lgb_booster, X, feature_cols, weights=None):
+    """
+    Ensemble prediction from XGBoost + LightGBM.
+    Falls back to XGBoost-only if LightGBM not available.
+    Returns probability of UP (class 1).
+    """
+    if weights is None:
+        weights = ENSEMBLE_WEIGHTS
+
+    xgb_proba = xgb_model.predict_proba(X)[:, 1]
+
+    if lgb_booster is not None:
+        try:
+            lgb_proba = lgb_booster.predict(X)
+            proba = weights["xgboost"] * xgb_proba + weights["lightgbm"] * lgb_proba
+        except Exception as e:
+            print(f"LightGBM prediction failed, using XGBoost only: {e}")
+            proba = xgb_proba
+    else:
+        proba = xgb_proba
+
+    return proba
+
+
+def predict_direction(model, df, threshold=None, lgb_booster=None):
     """
     Given a DataFrame of candles (with latest candle at index -1),
-    compute features and predict the direction of the NEXT candle.
+    compute features, add microstructure data, and predict direction.
+    Uses ensemble of XGBoost + LightGBM if available.
 
     Returns dict with prediction info.
     """
     if threshold is None:
-        # Load from saved metrics
         try:
             metrics_path = str(MODEL_PATH).replace(".json", "_metrics.json")
             with open(metrics_path) as f:
@@ -55,22 +100,66 @@ def predict_direction(model, df, threshold=None):
 
     # Compute features
     df_feat = compute_features(df.copy())
-    X, y, feature_cols = prepare_ml_data(df_feat, drop_na=True)
-
-    # Predict on last row (last complete candle)
+    
+    # Fetch microstructure data and add to last row
+    ob_data = fetch_order_book_imbalance(MEXC_SYMBOL, ORDERBOOK_DEPTH)
+    fr_data = fetch_funding_rate(FUNDING_RATE_SYMBOL)
+    oi_data = fetch_open_interest_mexc("BTC_USDT")
+    
+    # Add microstructure features to the dataframe
+    last_idx = df_feat.index[-1]
+    for key, val in ob_data.items():
+        df_feat.loc[last_idx, key] = val
+    df_feat.loc[last_idx, "funding_rate"] = fr_data["funding_rate"]
+    
+    # Open interest change (current vs previous -- need historical for %)
+    # For now, store raw OI; the pct change would need historical context
+    df_feat.loc[last_idx, "open_interest"] = oi_data["open_interest"]
+    
+    # Prepare features
+    X, y, feature_cols = prepare_ml_data(df_feat, drop_na=False)
+    
+    # Get the last valid row (may have NaNs in microstructure cols -- that's OK)
     X_last = X.iloc[[-1]]
-    proba = model.predict_proba(X_last)[0, 1]
+    
+    # Fill any NaN in microstructure cols with 0 (neutral signal)
+    X_last = X_last.fillna(0)
+
+    # Ensemble predict
+    proba = ensemble_predict(model, lgb_booster, X_last, feature_cols)
+    proba = float(proba[0])
+    
     prediction = 1 if proba >= threshold else 0
     confidence = abs(proba - 0.5) * 2  # 0 = 50/50, 1 = 100% confident
 
     # Direction
     direction = "UP" if prediction == 1 else "DOWN"
 
-    # Most recent candle info
+    # Volatility regime check
     last_candle = df_feat.iloc[-1]
-    last_close = last_candle["close"]
+    is_low_vol = bool(last_candle.get("low_volatility", 0))
+    
+    # Confidence filtering
+    skip_trade = False
+    skip_reason = None
+    if confidence < MIN_CONFIDENCE_TO_TRADE:
+        skip_trade = True
+        skip_reason = f"Confidence {confidence:.1%} below minimum {MIN_CONFIDENCE_TO_TRADE:.1%}"
+    elif is_low_vol:
+        skip_trade = True
+        skip_reason = "Low volatility regime -- signal unreliable"
+
+    # Confidence tier
+    if confidence >= HIGH_CONFIDENCE_THRESHOLD:
+        confidence_tier = "HIGH"
+    elif confidence >= 0.20:
+        confidence_tier = "MEDIUM"
+    else:
+        confidence_tier = "LOW"
+
+    # Most recent candle info
     prev_close = df_feat.iloc[-2]["close"]
-    candle_change_pct = (last_close - prev_close) / prev_close * 100
+    candle_change_pct = (last_candle["close"] - prev_close) / prev_close * 100
 
     result = {
         "timestamp": datetime.utcnow().isoformat(),
@@ -78,12 +167,24 @@ def predict_direction(model, df, threshold=None):
         "direction_code": prediction,
         "probability_up": round(proba, 4),
         "confidence": round(confidence, 4),
+        "confidence_tier": confidence_tier,
         "threshold_used": threshold,
-        "last_candle_close": round(last_close, 2),
+        "last_candle_close": round(float(last_candle["close"]), 2),
         "last_candle_change_pct": round(candle_change_pct, 4),
-        "rsi": round(last_candle["rsi"], 2) if not np.isnan(last_candle["rsi"]) else None,
-        "macd_histogram": round(last_candle["histogram"], 4) if not np.isnan(last_candle["histogram"]) else None,
-        "volume_ratio": round(last_candle["volume_ratio"], 2) if not np.isnan(last_candle["volume_ratio"]) else None,
+        "rsi": round(float(last_candle["rsi"]), 2) if not np.isnan(last_candle.get("rsi", np.nan)) else None,
+        "macd_histogram": round(float(last_candle["histogram"]), 4) if not np.isnan(last_candle.get("histogram", np.nan)) else None,
+        "volume_ratio": round(float(last_candle["volume_ratio"]), 2) if not np.isnan(last_candle.get("volume_ratio", np.nan)) else None,
+        "bb_position": round(float(last_candle.get("bb_position", np.nan)), 2) if not np.isnan(last_candle.get("bb_position", np.nan)) else None,
+        "atr_pct": round(float(last_candle.get("atr_pct", np.nan)), 4) if not np.isnan(last_candle.get("atr_pct", np.nan)) else None,
+        # New microstructure indicators
+        "bid_ask_imbalance": ob_data.get("bid_ask_imbalance"),
+        "top5_imbalance": ob_data.get("top5_imbalance"),
+        "spread_pct": ob_data.get("spread_pct"),
+        "funding_rate": fr_data.get("funding_rate"),
+        "is_low_volatility": is_low_vol,
+        "skip_trade": skip_trade,
+        "skip_reason": skip_reason,
+        "ensemble": lgb_booster is not None,
     }
 
     return result, df_feat
@@ -98,10 +199,8 @@ def format_signal_message(result):
     price = result["last_candle_close"]
     change = result["last_candle_change_pct"]
 
-    # Emoji based on direction
     emoji = "\U0001f7e2" if result["direction_code"] == 1 else "\U0001f534"
 
-    # Signal strength
     if conf >= 0.7:
         strength = "HIGH CONFIDENCE"
     elif conf >= 0.4:
@@ -126,16 +225,15 @@ def format_signal_message(result):
 
 
 def run_prediction():
-    """Main prediction runner — called every 5 mins."""
+    """Main prediction runner -- called every 5 mins."""
     log_file = os.path.join(LOGS_DIR, f"predictions_{datetime.utcnow().strftime('%Y%m%d')}.jsonl")
 
     print(f"\n[{datetime.utcnow().isoformat()}] Running prediction...")
 
     try:
-        # Load model
         model, metrics = load_model()
+        lgb_booster = load_lgb_model()
 
-        # Get latest candles from MEXC
         df = fetch_live_candles(
             symbol=MEXC_SYMBOL,
             interval=MEXC_INTERVAL,
@@ -143,16 +241,13 @@ def run_prediction():
         )
         print(f"  Fetched {len(df)} candles: {df.datetime.min().strftime('%H:%M')} -> {df.datetime.max().strftime('%H:%M')}")
 
-        # Predict
-        result, df_feat = predict_direction(model, df)
+        result, df_feat = predict_direction(model, df, lgb_booster=lgb_booster)
 
-        # Format and print
         msg = format_signal_message(result)
         print(f"  {msg.replace(chr(10), ' | ')}")
 
-        # Log to file
         with open(log_file, "a") as f:
-            f.write(json.dumps(result) + "\n")
+            f.write(json.dumps(result, default=str) + "\n")
 
         return result
 

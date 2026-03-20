@@ -37,9 +37,28 @@ BB_STD = 2
 MOMENTUM_PERIODS = [3, 5, 7]
 VOL_LOOKBACK = 20
 
+# ── Order book config ───────────────────────────────────────────
+ORDERBOOK_DEPTH = 20  # levels to fetch for bid/ask imbalance
+
+# ── Funding rate config ─────────────────────────────────────────
+FUNDING_RATE_SYMBOL = "BTC/USDT:USDT"  # MEXC perpetual swap symbol
+
+# ── Regime filter config ────────────────────────────────────────
+VOLATILITY_REGIME_LOOKBACK = 50  # candles to compute volatility regime
+LOW_VOLATILITY_ATR_PERCENTILE = 20  # below this = low vol regime
+
+# ── Ensemble config ─────────────────────────────────────────────
+ENSEMBLE_WEIGHTS = {"xgboost": 0.5, "lightgbm": 0.5}  # equal weight by default
+LIGHTGBM_MODEL_PATH = MODELS_DIR / "btc_direction_lgb.txt"
+
+# ── Confidence filter config ────────────────────────────────────
+MIN_CONFIDENCE_TO_TRADE = float(os.getenv("MIN_CONFIDENCE_TO_TRADE", "0.10"))
+HIGH_CONFIDENCE_THRESHOLD = 0.40
+
 # ── Model paths ─────────────────────────────────────────────────
 MODEL_PATH = MODELS_DIR / "btc_direction_model.json"
 MODEL_BACKUP_PATH = MODELS_DIR / "btc_direction_model_backup.json"
+LIGHTGBM_BACKUP_PATH = MODELS_DIR / "btc_direction_lgb_backup.txt"
 
 # ── Prediction config ───────────────────────────────────────────
 PREDICTION_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.52"))

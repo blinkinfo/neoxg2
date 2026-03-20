@@ -1,14 +1,15 @@
 """
 features.py
 Feature engineering for BTC 5-min candle direction prediction.
-Computes technical indicators used as features for XGBoost model.
+Computes technical indicators used as features for XGBoost + LightGBM ensemble.
 """
 
 import pandas as pd
 import numpy as np
 from src.config import (
     RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
-    BB_PERIOD, BB_STD, MOMENTUM_PERIODS, VOL_LOOKBACK
+    BB_PERIOD, BB_STD, MOMENTUM_PERIODS, VOL_LOOKBACK,
+    VOLATILITY_REGIME_LOOKBACK, LOW_VOLATILITY_ATR_PERCENTILE,
 )
 
 
@@ -79,7 +80,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     open_price = df["open"]
     volume = df["volume"]
     
-    # ─── Price-based features ────────────────────────────────────────────
+    # --- Price-based features ---
     
     # Candle body and wick sizes
     body = close - open_price
@@ -95,7 +96,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["candle_size"] = candle_size
     df["candle_size_pct"] = candle_size / close  # ATR-like
     
-    # ─── RSI ────────────────────────────────────────────────────────────────
+    # --- RSI ---
     rsi = compute_rsi(close, RSI_PERIOD)
     df["rsi"] = rsi
     
@@ -103,7 +104,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["rsi_overbought"] = (rsi > 70).astype(int)
     df["rsi_oversold"] = (rsi < 30).astype(int)
     
-    # ─── MACD ───────────────────────────────────────────────────────────────
+    # --- MACD ---
     macd_df = compute_macd(close, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
     for col in ["macd", "signal", "histogram"]:
         df[col] = macd_df[col]
@@ -111,27 +112,28 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # MACD crossover signal
     df["macd_histogram_pos"] = (macd_df["histogram"] > 0).astype(int)
     
-    # ─── Bollinger Bands ─────────────────────────────────────────────────────
+    # --- Bollinger Bands ---
     bb_df = compute_bollinger_bands(close, BB_PERIOD, BB_STD)
+    # Store raw BB values in df (for reference) but NOT used as ML features
     for col in ["bb_upper", "bb_middle", "bb_lower", "bb_width"]:
         df[col] = bb_df[col]
     
-    # Price relative to BB
+    # Price relative to BB (normalized — these ARE used as features)
     df["bb_position"] = (close - bb_df["bb_lower"]) / (bb_df["bb_upper"] - bb_df["bb_lower"])
     df["price_vs_bb_upper"] = (close - bb_df["bb_upper"]) / bb_df["bb_upper"]
     df["price_vs_bb_lower"] = (close - bb_df["bb_lower"]) / bb_df["bb_lower"]
     
-    # ─── Momentum ────────────────────────────────────────────────────────────
+    # --- Momentum ---
     for period in MOMENTUM_PERIODS:
         df[f"momentum_{period}"] = close - close.shift(period)
         df[f"momentum_{period}_pct"] = (close - close.shift(period)) / close.shift(period)
     
-    # ─── Volume ───────────────────────────────────────────────────────────────
+    # --- Volume ---
     vol_ma = volume.rolling(window=VOL_LOOKBACK, min_periods=VOL_LOOKBACK).mean()
     df["volume_ratio"] = volume / vol_ma  # spike = > 1.5, crush = < 0.5
     df["volume_ma"] = vol_ma
     
-    # ─── Volatility (ATR) ─────────────────────────────────────────────────────
+    # --- Volatility (ATR) ---
     high_low = high - low
     high_close = (high - close.shift(1)).abs()
     low_close = (low - close.shift(1)).abs()
@@ -139,21 +141,34 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["atr"] = true_range.rolling(window=14).mean()
     df["atr_pct"] = df["atr"] / close
     
-    # ─── Direction labels ──────────────────────────────────────────────────────
+    # --- Direction labels ---
     # Label: 1 = next candle closed UP, 0 = next candle closed DOWN
     # (this is the TARGET we train the model to predict)
     df["next_close"] = close.shift(-1)
     df["direction_label"] = (df["next_close"] > close).astype(int)
     
+    # Mark flat candles (next_close == close) -- these are noise
+    df["is_flat"] = (df["next_close"] == close).astype(int)
+    
     # Also compute: was the CURRENT candle up or down?
     df["candle_up"] = (close > open_price).astype(int)
     
-    # ─── Time features ───────────────────────────────────────────────────────
-    # (for seasonality — crypto has some hourly/daily patterns)
+    # --- Volatility regime (ATR percentile over lookback window) ---
+    atr_rolling = df["atr_pct"].rolling(window=VOLATILITY_REGIME_LOOKBACK, min_periods=10)
+    df["atr_percentile"] = atr_rolling.apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False)
+    df["low_volatility"] = (df["atr_percentile"] < LOW_VOLATILITY_ATR_PERCENTILE / 100).astype(int)
+    
+    # --- Time features ---
+    # (for seasonality -- crypto has some hourly/daily patterns)
     if "datetime" in df.columns:
         df["hour"] = df["datetime"].dt.hour
         df["minute"] = df["datetime"].dt.minute
         df["dayofweek"] = df["datetime"].dt.dayofweek
+        # Cyclical encoding (sin/cos) -- captures wrap-around nature
+        df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
+        df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
+        df["dow_sin"] = np.sin(2 * np.pi * df["dayofweek"] / 7)
+        df["dow_cos"] = np.cos(2 * np.pi * df["dayofweek"] / 7)
     
     return df
 
@@ -161,23 +176,14 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 def prepare_ml_data(df: pd.DataFrame, drop_na=True):
     """
     Prepare final feature matrix X and target vector y.
-    
-    Features used for training:
-    - rsi, rsi_overbought, rsi_oversold
-    - macd, signal, histogram, macd_histogram_pos
-    - bb_upper, bb_middle, bb_lower, bb_width, bb_position
-    - price_vs_bb_upper, price_vs_bb_lower
-    - momentum_3, momentum_5, momentum_7 (and pct versions)
-    - volume_ratio
-    - atr, atr_pct
-    - candle_body_pct, upper_wick, lower_wick
-    - hour, minute, dayofweek
-    - candle_up (previous candle direction)
+    Dynamically includes microstructure features if present.
+    Filters out flat candles from training data.
     """
+    # Base features (always available from OHLCV)
     feature_cols = [
         "rsi", "rsi_overbought", "rsi_oversold",
         "macd", "signal", "histogram", "macd_histogram_pos",
-        "bb_upper", "bb_middle", "bb_lower", "bb_width", "bb_position",
+        "bb_width", "bb_position",
         "price_vs_bb_upper", "price_vs_bb_lower",
         "momentum_3", "momentum_3_pct",
         "momentum_5", "momentum_5_pct",
@@ -185,18 +191,36 @@ def prepare_ml_data(df: pd.DataFrame, drop_na=True):
         "volume_ratio",
         "atr", "atr_pct",
         "candle_body_pct", "upper_wick", "lower_wick",
-        "hour", "minute", "dayofweek",
+        "hour_sin", "hour_cos", "dow_sin", "dow_cos",
         "candle_up",
+        "atr_percentile", "low_volatility",
     ]
+    
+    # Microstructure features (from live data feeds -- may not exist in historical)
+    optional_cols = [
+        "bid_ask_imbalance", "top5_imbalance", "spread_pct",
+        "funding_rate", "open_interest_change_pct",
+    ]
+    for col in optional_cols:
+        if col in df.columns and df[col].notna().any():
+            feature_cols.append(col)
+    
+    # Only keep columns that actually exist in df
+    feature_cols = [c for c in feature_cols if c in df.columns]
     
     X = df[feature_cols].copy()
     y = df["direction_label"].copy()
     
     if drop_na:
-        # Drop rows with NaN (first ~20 candles due to rolling windows)
         valid_idx = X.dropna().index
         X = X.loc[valid_idx]
         y = y.loc[valid_idx]
+        
+        # Filter out flat candles (next_close == close) -- they're noise
+        if "is_flat" in df.columns:
+            flat_mask = df.loc[X.index, "is_flat"] == 1
+            X = X[~flat_mask]
+            y = y[~flat_mask]
     
     return X, y, feature_cols
 

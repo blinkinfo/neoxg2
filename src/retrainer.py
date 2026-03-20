@@ -8,6 +8,7 @@ Features:
   - Consecutive rejection tracking: force-accepts after N rejections to avoid staleness
   - Fresh data fetch before each retrain
   - Full Telegram notification support
+  - LightGBM ensemble model backup and promotion
 """
 
 import json
@@ -22,6 +23,7 @@ from pathlib import Path
 from src.config import (
     MODEL_PATH, MODEL_BACKUP_PATH, DATA_DIR, LOGS_DIR, MODELS_DIR,
     RETRAIN_MAX_CONSECUTIVE_REJECTIONS,
+    LIGHTGBM_MODEL_PATH, LIGHTGBM_BACKUP_PATH,
 )
 
 log = logging.getLogger(__name__)
@@ -216,6 +218,7 @@ def run_retrain(force_accept: bool = False) -> dict:
         log.info("Retrain: training new model...")
         temp_model_path = MODELS_DIR / "btc_direction_model_challenger.json"
         temp_metrics_path = MODELS_DIR / "btc_direction_model_challenger_metrics.json"
+        temp_lgb_path = MODELS_DIR / "btc_direction_model_challenger_lgb.txt"
 
         from src.trainer import run_training
         new_model, new_metrics = run_training(days_train=120, days_val=30)
@@ -259,10 +262,18 @@ def run_retrain(force_accept: bool = False) -> dict:
                     shutil.copy2(metrics_path, backup_metrics)
                 log.info("Retrain: current model backed up.")
 
+            # Backup LightGBM model too
+            if os.path.exists(str(LIGHTGBM_MODEL_PATH)):
+                shutil.copy2(str(LIGHTGBM_MODEL_PATH), str(LIGHTGBM_BACKUP_PATH))
+
             # Promote challenger to champion
             shutil.move(str(temp_model_path), str(MODEL_PATH))
             shutil.move(str(temp_metrics_path), metrics_path)
             log.info("Retrain: new model PROMOTED to champion.")
+
+            # Promote LightGBM challenger if it exists
+            if os.path.exists(str(temp_lgb_path)):
+                shutil.move(str(temp_lgb_path), str(LIGHTGBM_MODEL_PATH))
 
             state["total_upgrades"] += 1
             state["consecutive_rejections"] = 0
@@ -273,6 +284,8 @@ def run_retrain(force_accept: bool = False) -> dict:
                 os.remove(temp_model_path)
             if os.path.exists(temp_metrics_path):
                 os.remove(temp_metrics_path)
+            if os.path.exists(str(temp_lgb_path)):
+                os.remove(str(temp_lgb_path))
             log.info("Retrain: challenger REJECTED, keeping current model.")
 
             state["total_rejections"] += 1

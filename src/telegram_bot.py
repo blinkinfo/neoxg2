@@ -119,36 +119,46 @@ def load_model():
     return model, metrics
 
 
+def load_lgb_model():
+    """Load LightGBM model for ensemble. Returns None if not available."""
+    try:
+        import lightgbm as lgb
+        from src.config import LIGHTGBM_MODEL_PATH
+        if not os.path.exists(LIGHTGBM_MODEL_PATH):
+            return None
+        model = lgb.Booster(model_file=str(LIGHTGBM_MODEL_PATH))
+        return model
+    except Exception as e:
+        log.warning(f"LightGBM model not available: {e}")
+        return None
+
+
 def get_live_prediction():
+    """
+    Get a live prediction using the ensemble model + microstructure data.
+    Called by both manual /signal and auto-signal job.
+    """
+    from src.predictor import predict_direction
+    
     model, metrics = load_model()
+    lgb_booster = load_lgb_model()
     threshold, threshold_source = resolve_threshold(metrics)
+    
     df = fetch_live_candles(lookback=200)
-    df_feat = compute_features(df.copy())
-    X, _, _ = prepare_ml_data(df_feat, drop_na=True)
-    X_last = X.iloc[[-1]]
-    proba = model.predict_proba(X_last)[0, 1]
-    prediction = 1 if proba >= threshold else 0
-    confidence = abs(proba - 0.5) * 2
-    last_c = df_feat.iloc[-1]
-    prev_c = df_feat.iloc[-2]
-    def _safe(val):
-        return None if (val is None or (isinstance(val, float) and np.isnan(val))) else val
-    return {
-        "prediction":      "UP" if prediction == 1 else "DOWN",
-        "direction_code":  prediction,
-        "probability_up":  round(proba, 4),
-        "confidence":      round(confidence, 4),
-        "threshold":       threshold,
-        "threshold_source": threshold_source,
-        "last_close":      round(last_c["close"], 2),
-        "prev_close":      round(prev_c["close"], 2),
-        "rsi":             _safe(round(last_c["rsi"], 2) if "rsi" in last_c else None),
-        "macd_histogram":  _safe(round(last_c["histogram"], 4) if "histogram" in last_c else None),
-        "volume_ratio":    _safe(round(last_c["volume_ratio"], 2) if "volume_ratio" in last_c else None),
-        "bb_position":     _safe(round(last_c["bb_position"], 2) if "bb_position" in last_c else None),
-        "atr_pct":         _safe(round(last_c["atr_pct"], 4) if "atr_pct" in last_c else None),
-        "timestamp":       datetime.now(timezone.utc).isoformat(),
-    }, metrics
+    
+    result, df_feat = predict_direction(model, df, threshold=threshold, lgb_booster=lgb_booster)
+    
+    # Map fields for telegram_bot compatibility
+    result["threshold"] = threshold
+    result["threshold_source"] = threshold_source
+    result["last_close"] = result.get("last_candle_close", 0)
+    result["prev_close"] = round(float(df_feat.iloc[-2]["close"]), 2)
+    
+    # Keep direction and direction_code from predictor
+    # Keep confidence, confidence_tier from predictor
+    # Keep all microstructure fields from predictor
+    
+    return result, metrics
 
 
 def _next_candle_boundary():
@@ -260,6 +270,19 @@ def format_signal_message(result: dict, metrics: dict, stats: dict) -> str:
     if vol  is not None: indicator_lines.append(f"  Vol Ratio     {vol:.2f}x")
     if bb   is not None: indicator_lines.append(f"  BB Position   {bb:.2f}")
     if atr  is not None: indicator_lines.append(f"  ATR %         {atr:.3%}")
+
+    # New microstructure indicators
+    ob_imb = result.get("bid_ask_imbalance")
+    funding = result.get("funding_rate")
+    spread = result.get("spread_pct")
+    
+    if ob_imb is not None and not (isinstance(ob_imb, float) and np.isnan(ob_imb)):
+        indicator_lines.append(f"  OB Imbalance  {ob_imb:+.4f}")
+    if funding is not None and not (isinstance(funding, float) and np.isnan(funding)):
+        indicator_lines.append(f"  Funding Rate  {funding:+.6f}")
+    if spread is not None and not (isinstance(spread, float) and np.isnan(spread)):
+        indicator_lines.append(f"  Spread        {spread:.4f}%")
+
     if indicator_lines:
         lines.append("\U0001f4ca  <b>Indicators</b>")
         lines.append("<code>" + "\n".join(indicator_lines) + "</code>")
@@ -278,6 +301,20 @@ def format_signal_message(result: dict, metrics: dict, stats: dict) -> str:
             f"\U0001f4c8  <b>Session:</b>  {stats['total']} trades  \u2502  WR {wr:.1%}  \u2502  {_pnl_display(pnl)}",
             f"{_streak_display(sk, skt)}",
         ]
+
+    # Skip trade warning
+    if result.get("skip_trade"):
+        lines += [
+            "",
+            "\u26a0\ufe0f  <b>SKIP RECOMMENDED</b>",
+            f"      <i>{result.get('skip_reason', 'Low confidence')}</i>",
+        ]
+    
+    # Ensemble indicator
+    if result.get("ensemble"):
+        lines.append("")
+        lines.append("\U0001f9e0  <i>Ensemble: XGBoost + LightGBM</i>")
+
     return "\n".join(lines)
 
 
@@ -621,14 +658,14 @@ def run_bot():
 
     async def _set_menu_commands(app_instance):
         commands = [
-            BotCommand("signal",       "🟢 Get live BTC prediction"),
-            BotCommand("stats",        "📊 Win rate, P&L, trades"),
-            BotCommand("accuracy",     "📋 Accuracy breakdown"),
-            BotCommand("status",       "🤖 Model health & perf"),
-            BotCommand("threshold",    "⚙️ Threshold settings"),
-            BotCommand("setthreshold", "✏️ Set threshold value"),
-            BotCommand("retrain",      "🔄 Retrain model now"),
-            BotCommand("help",         "📖 Command reference"),
+            BotCommand("signal",       "\U0001f7e2 Get live BTC prediction"),
+            BotCommand("stats",        "\U0001f4ca Win rate, P&L, trades"),
+            BotCommand("accuracy",     "\U0001f4cb Accuracy breakdown"),
+            BotCommand("status",       "\U0001f916 Model health & perf"),
+            BotCommand("threshold",    "\u2699\ufe0f Threshold settings"),
+            BotCommand("setthreshold", "\u270d\ufe0f Set threshold value"),
+            BotCommand("retrain",      "\U0001f504 Retrain model now"),
+            BotCommand("help",         "\U0001f4d6 Command reference"),
         ]
         await app_instance.bot.set_my_commands(commands)
         log.info("Menu commands registered with Telegram.")
@@ -646,7 +683,7 @@ def run_bot():
     async def signal_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.reply_text(
-                "⏳ <i>Fetching signal...</i>", parse_mode=ParseMode.HTML
+                "\u23f3 <i>Fetching signal...</i>", parse_mode=ParseMode.HTML
             )
             locked = acquire_signal_lock(timeout=10)
             try:
@@ -677,9 +714,9 @@ def run_bot():
         except Exception as e:
             log.exception("signal_cmd error")
             await update.message.reply_text(
-                f"⚠️ <b>Signal Error</b>\n\n"
+                f"\u26a0\ufe0f <b>Signal Error</b>\n\n"
                 f"<code>{_html_escape(str(e))}</code>\n\n"
-                f"🔄 <i>Try again in a moment or check /status.</i>",
+                f"\U0001f504 <i>Try again in a moment or check /status.</i>",
                 parse_mode=ParseMode.HTML,
             )
 
@@ -697,7 +734,7 @@ def run_bot():
         except Exception as e:
             log.exception("stats_cmd error")
             await update.message.reply_text(
-                f"⚠️ <b>Stats Error</b>\n\n"
+                f"\u26a0\ufe0f <b>Stats Error</b>\n\n"
                 f"<code>{_html_escape(str(e))}</code>",
                 parse_mode=ParseMode.HTML,
             )
@@ -711,7 +748,7 @@ def run_bot():
         except Exception as e:
             log.exception("status_cmd error")
             await update.message.reply_text(
-                f"⚠️ <b>Status Error</b>\n\n"
+                f"\u26a0\ufe0f <b>Status Error</b>\n\n"
                 f"<code>{_html_escape(str(e))}</code>",
                 parse_mode=ParseMode.HTML,
             )
@@ -723,10 +760,10 @@ def run_bot():
             resolved = [t for t in tracker_data.get("trades", []) if t.get("resolved")]
             if not resolved:
                 await update.message.reply_text(
-                    "📋  <b>Live Accuracy Report</b>\n"
-                    "─" * 27 + "\n\n"
-                    "📭  No resolved trades yet.\n\n"
-                    "🕒  <i>Auto-signals run every 5 min.\n"
+                    "\U0001f4cb  <b>Live Accuracy Report</b>\n"
+                    "\u2500" * 27 + "\n\n"
+                    "\U0001f4ed  No resolved trades yet.\n\n"
+                    "\U0001f552  <i>Auto-signals run every 5 min.\n"
                     "Trades resolve when their candle closes.\n"
                     "Check back in a few minutes!</i>",
                     parse_mode=ParseMode.HTML,
@@ -740,7 +777,7 @@ def run_bot():
         except Exception as e:
             log.exception("accuracy_cmd error")
             await update.message.reply_text(
-                f"⚠️ <b>Accuracy Error</b>\n\n"
+                f"\u26a0\ufe0f <b>Accuracy Error</b>\n\n"
                 f"<code>{_html_escape(str(e))}</code>",
                 parse_mode=ParseMode.HTML,
             )
@@ -754,7 +791,7 @@ def run_bot():
         except Exception as e:
             log.exception("threshold_cmd error")
             await update.message.reply_text(
-                f"⚠️ <b>Threshold Error</b>\n\n"
+                f"\u26a0\ufe0f <b>Threshold Error</b>\n\n"
                 f"<code>{_html_escape(str(e))}</code>",
                 parse_mode=ParseMode.HTML,
             )
@@ -764,12 +801,12 @@ def run_bot():
             args = ctx.args
             if not args:
                 await update.message.reply_text(
-                    "✏️  <b>Set Threshold</b>\n"
-                    "─" * 27 + "\n\n"
-                    "📝  <b>Usage:</b>\n"
-                    "      <code>/setthreshold 0.62</code>  —  set threshold\n"
-                    "      <code>/setthreshold reset</code>  —  revert to default\n\n"
-                    f"📏  Valid range:  <code>{THRESHOLD_MIN}</code> — <code>{THRESHOLD_MAX}</code>",
+                    "\u270d\ufe0f  <b>Set Threshold</b>\n"
+                    "\u2500" * 27 + "\n\n"
+                    "\U0001f4dd  <b>Usage:</b>\n"
+                    "      <code>/setthreshold 0.62</code>  \u2014  set threshold\n"
+                    "      <code>/setthreshold reset</code>  \u2014  revert to default\n\n"
+                    f"\U0001f4cf  Valid range:  <code>{THRESHOLD_MIN}</code> \u2014 <code>{THRESHOLD_MAX}</code>",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -779,7 +816,7 @@ def run_bot():
                 _, metrics = load_model()
                 trained = metrics.get("threshold", PREDICTION_THRESHOLD)
                 await update.message.reply_text(
-                    "✅  <b>Threshold Reset</b>\n\n"
+                    "\u2705  <b>Threshold Reset</b>\n\n"
                     f"Reverted to model default.\n"
                     f"Active threshold:  <code>{trained:.3f}</code>  <i>(model trained)</i>",
                     parse_mode=ParseMode.HTML,
@@ -789,21 +826,21 @@ def run_bot():
                 value = float(raw)
             except ValueError:
                 await update.message.reply_text(
-                    f"⚠️  <b>Invalid Value</b>\n\n"
+                    f"\u26a0\ufe0f  <b>Invalid Value</b>\n\n"
                     f"<code>{_html_escape(raw)}</code> is not a valid number.\n\n"
-                    f"📏  Use a number between <code>{THRESHOLD_MIN}</code> and <code>{THRESHOLD_MAX}</code>, "
+                    f"\U0001f4cf  Use a number between <code>{THRESHOLD_MIN}</code> and <code>{THRESHOLD_MAX}</code>, "
                     f"or <code>reset</code>.",
                     parse_mode=ParseMode.HTML,
                 )
                 return
             if not (THRESHOLD_MIN <= value <= THRESHOLD_MAX):
                 await update.message.reply_text(
-                    f"⚠️  <b>Out of Range</b>\n\n"
+                    f"\u26a0\ufe0f  <b>Out of Range</b>\n\n"
                     f"<code>{value:.3f}</code> is outside the valid range.\n"
-                    f"📏  Valid:  <code>{THRESHOLD_MIN}</code> — <code>{THRESHOLD_MAX}</code>\n\n"
-                    "💡  <b>Guidance:</b>\n"
-                    "      📝  Paper trading  →  <code>0.52 - 0.58</code>\n"
-                    "      💵  Real money  →  <code>0.60 - 0.70</code>",
+                    f"\U0001f4cf  Valid:  <code>{THRESHOLD_MIN}</code> \u2014 <code>{THRESHOLD_MAX}</code>\n\n"
+                    "\U0001f4a1  <b>Guidance:</b>\n"
+                    "      \U0001f4dd  Paper trading  \u2192  <code>0.52 - 0.58</code>\n"
+                    "      \U0001f4b5  Real money  \u2192  <code>0.60 - 0.70</code>",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -814,16 +851,16 @@ def run_bot():
             impact = ""
             if diff > 0.08:
                 impact = (
-                    "\n\n⚠️  <i>Significantly above model optimal. "
+                    "\n\n\u26a0\ufe0f  <i>Significantly above model optimal. "
                     "Fewer signals but not guaranteed more accurate.</i>"
                 )
             elif diff < -0.08:
                 impact = (
-                    "\n\n⚠️  <i>Significantly below model optimal. "
+                    "\n\n\u26a0\ufe0f  <i>Significantly below model optimal. "
                     "More signals but lower expected accuracy.</i>"
                 )
             await update.message.reply_text(
-                "✅  <b>Threshold Updated</b>\n\n"
+                "\u2705  <b>Threshold Updated</b>\n\n"
                 "<code>"
                 f"  New threshold   {value:.3f}  (runtime override)\n"
                 f"  Model trained   {trained:.3f}\n"
@@ -835,7 +872,7 @@ def run_bot():
         except Exception as e:
             log.exception("setthreshold_cmd error")
             await update.message.reply_text(
-                f"⚠️  <b>Threshold Error</b>\n\n"
+                f"\u26a0\ufe0f  <b>Threshold Error</b>\n\n"
                 f"<code>{_html_escape(str(e))}</code>",
                 parse_mode=ParseMode.HTML,
             )
@@ -844,7 +881,7 @@ def run_bot():
         try:
             if is_retrain_in_progress():
                 await update.message.reply_text(
-                    "⏳  <b>Retrain Already Running</b>\n\n"
+                    "\u23f3  <b>Retrain Already Running</b>\n\n"
                     "A retrain is currently in progress.\n"
                     "Please wait for it to finish.",
                     parse_mode=ParseMode.HTML,
@@ -854,16 +891,16 @@ def run_bot():
             force = bool(args and args[0].strip().lower() == "force")
             if force:
                 await update.message.reply_text(
-                    "🔄  <b>Force Retrain Started</b>\n\n"
-                    "⏳ <i>Fetching data + training new model...\n"
+                    "\U0001f504  <b>Force Retrain Started</b>\n\n"
+                    "\u23f3 <i>Fetching data + training new model...\n"
                     "New model will be accepted regardless of performance.\n"
                     "This takes ~2-3 minutes.</i>",
                     parse_mode=ParseMode.HTML,
                 )
             else:
                 await update.message.reply_text(
-                    "🔄  <b>Retrain Started</b>\n\n"
-                    "⏳ <i>Fetching data + training new model...\n"
+                    "\U0001f504  <b>Retrain Started</b>\n\n"
+                    "\u23f3 <i>Fetching data + training new model...\n"
                     "New model will be compared against current.\n"
                     "This takes ~2-3 minutes.</i>",
                     parse_mode=ParseMode.HTML,
@@ -877,15 +914,15 @@ def run_bot():
         except Exception as e:
             log.exception("retrain_cmd error")
             await update.message.reply_text(
-                f"⚠️ <b>Retrain Error</b>\n\n"
+                f"\u26a0\ufe0f <b>Retrain Error</b>\n\n"
                 f"<code>{_html_escape(str(e))}</code>",
                 parse_mode=ParseMode.HTML,
             )
 
     async def unknown_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "❓  Unknown command.\n\n"
-            "📖  Type /help for the full command list.",
+            "\u2753  Unknown command.\n\n"
+            "\U0001f4d6  Type /help for the full command list.",
             parse_mode=ParseMode.HTML,
         )
 
@@ -964,9 +1001,9 @@ def run_bot():
                 await ctx.bot.send_message(
                     chat_id=TELEGRAM_CHAT_ID,
                     text=(
-                        "⚠️  <b>Auto-Retrain Failed</b>\n\n"
+                        "\u26a0\ufe0f  <b>Auto-Retrain Failed</b>\n\n"
                         f"<code>{_html_escape(str(e))}</code>\n\n"
-                        "🔄 <i>Will retry at next scheduled interval.</i>"
+                        "\U0001f504 <i>Will retry at next scheduled interval.</i>"
                     ),
                     parse_mode=ParseMode.HTML,
                 )
