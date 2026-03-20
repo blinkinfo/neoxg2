@@ -57,6 +57,32 @@ def load_lgb_model():
         return None
 
 
+def _get_model_feature_names(xgb_model, lgb_booster):
+    """
+    Extract the feature names the models were actually trained on.
+    Uses XGBoost as the source of truth (always available).
+    Returns list of feature names.
+    """
+    try:
+        xgb_features = xgb_model.get_booster().feature_names
+        if xgb_features:
+            return xgb_features
+    except Exception:
+        pass
+
+    # Fallback: try LightGBM
+    if lgb_booster is not None:
+        try:
+            lgb_features = lgb_booster.feature_name()
+            if lgb_features:
+                return lgb_features
+        except Exception:
+            pass
+
+    # Last resort: return None (no filtering will be applied)
+    return None
+
+
 def ensemble_predict(xgb_model, lgb_booster, X, feature_cols, weights=None):
     """
     Ensemble prediction from XGBoost + LightGBM.
@@ -124,6 +150,22 @@ def predict_direction(model, df, threshold=None, lgb_booster=None):
     
     # Fill any NaN in microstructure cols with 0 (neutral signal)
     X_last = X_last.fillna(0)
+
+    # --- FIX: Align inference features to model's trained features ---
+    # The model was trained on OHLCV-derived features only (30 features).
+    # Microstructure features (bid_ask_imbalance, top5_imbalance, spread_pct,
+    # funding_rate) are injected at inference but don't exist in the trained
+    # model. We must filter X_last to only the features the model expects.
+    trained_features = _get_model_feature_names(model, lgb_booster)
+    if trained_features is not None:
+        # Only keep columns the model was trained on, in the correct order
+        missing = [f for f in trained_features if f not in X_last.columns]
+        if missing:
+            # Shouldn't happen, but guard against it: fill missing with 0
+            for col in missing:
+                X_last[col] = 0
+        X_last = X_last[trained_features]
+        feature_cols = list(trained_features)
 
     # Ensemble predict
     proba = ensemble_predict(model, lgb_booster, X_last, feature_cols)
