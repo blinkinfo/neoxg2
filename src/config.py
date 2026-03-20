@@ -39,9 +39,14 @@ VOL_LOOKBACK = 20
 
 # ── Model paths ─────────────────────────────────────────────────
 MODEL_PATH = MODELS_DIR / "btc_direction_model.json"
+MODEL_BACKUP_PATH = MODELS_DIR / "btc_direction_model_backup.json"
 
 # ── Prediction config ───────────────────────────────────────────
 PREDICTION_THRESHOLD = float(os.getenv("PREDICTION_THRESHOLD", "0.52"))
+
+# ── Auto-retrain config ────────────────────────────────────────
+RETRAIN_INTERVAL_HOURS = int(os.getenv("RETRAIN_INTERVAL_HOURS", "24"))
+RETRAIN_MAX_CONSECUTIVE_REJECTIONS = int(os.getenv("RETRAIN_MAX_REJECTIONS", "5"))
 
 # ── Telegram (required) ────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
